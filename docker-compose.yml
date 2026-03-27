@@ -1,0 +1,69 @@
+services:
+  mistral-mock:
+    build:
+      context: ./mocks
+    container_name: pdf-proc-mistral-mock
+    ports:
+      - "8001:8001"
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: pdf-proc-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+
+  backend:
+    build:
+      context: ./backend
+    container_name: pdf-proc-backend
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_URL: "redis://redis:6379/0"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      MISTRAL_API_KEY: "${MISTRAL_API_KEY:-mock-local-key}"
+      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-2.5-flash}"
+      MISTRAL_MODEL: "${MISTRAL_MODEL:-mistral-small-latest}"
+      MISTRAL_API_BASE_URL: "${MISTRAL_API_BASE_URL:-http://mistral-mock:8001}"
+      CORS_ORIGINS: "http://localhost:5173,http://127.0.0.1:5173"
+    depends_on:
+      - mistral-mock
+      - redis
+
+  worker:
+    build:
+      context: ./backend
+    container_name: pdf-proc-worker
+    depends_on:
+      - mistral-mock
+      - redis
+    environment:
+      REDIS_URL: "redis://redis:6379/0"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      MISTRAL_API_KEY: "${MISTRAL_API_KEY:-mock-local-key}"
+      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-2.5-flash}"
+      MISTRAL_MODEL: "${MISTRAL_MODEL:-mistral-small-latest}"
+      MISTRAL_API_BASE_URL: "${MISTRAL_API_BASE_URL:-http://mistral-mock:8001}"
+      REDIS_STREAM_NAME: "${REDIS_STREAM_NAME:-doc_jobs}"
+      REDIS_CONSUMER_GROUP: "${REDIS_CONSUMER_GROUP:-doc_workers}"
+      JOB_TTL_SECONDS: "${JOB_TTL_SECONDS:-604800}"
+
+    command: ["python", "-m", "app.worker"]
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: pdf-proc-frontend
+    ports:
+      - "5173:5173"
+    environment:
+      # Frontend (dev mode) calls /api via the Vite proxy
+      VITE_API_BASE_URL: "/api"
+    depends_on:
+      - backend
+
+volumes:
+  redis-data:
