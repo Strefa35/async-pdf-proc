@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare .env for backend
+        run: |
+          cp .env.example .env
+          if [ -z "${{ secrets.GOOGLE_API_KEY }}" ]; then
+            echo "Missing required secret: GOOGLE_API_KEY" >&2
+            exit 1
+          fi
+          printf '\nGOOGLE_API_KEY="%s"\n' "${{ secrets.GOOGLE_API_KEY }}" >> .env
+
+      - name: Make CI script executable
+        run: chmod +x ./scripts/ci_build_and_test.sh
+
+      - name: Build stack and run all tests
+        run: ./scripts/ci_build_and_test.sh
