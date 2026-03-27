@@ -13,6 +13,17 @@ This document describes the test scripts under `tests/`, how to run them, and co
 
 Scripts use **bash**, **curl**, and **Python 3** (JSON parsing).
 
+**Important:** before running tests, download required PDF fixtures:
+
+```bash
+./tests/download_pdf_fixtures.sh
+```
+
+The downloader pulls a compact set of lightweight PDFs (fast fixtures for local runs), including `drylab.pdf`, `example.pdf`, `flyer.pdf`, and `somatosensory.pdf` from PrinceXML sample documents. It supports:
+
+- `--force` to re-download existing files
+- `--strict` to fail when any source is unavailable
+
 ## Environment variables
 
 Shared by most FR and integration tests (see `tests/lib/fr_common.sh`):
