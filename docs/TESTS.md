@@ -1,131 +1,141 @@
 # Automated tests
 
-This document describes the test scripts under `tests/`, how to run them, and common dependencies. Unless noted, run commands from the **project repository root**. Functional requirements are defined in [`docs/REQUIREMENTS.md`](REQUIREMENTS.md); a manual checklist lives in [`docs/TEST_CHECKLIST.md`](TEST_CHECKLIST.md).
+This document describes how to run the **Python (pytest + httpx)** integration suite. Unless noted, run commands from the **project repository root**. Functional requirements are in [`docs/REQUIREMENTS.md`](REQUIREMENTS.md); a manual checklist is in [`docs/TEST_CHECKLIST.md`](TEST_CHECKLIST.md).
 
 ## Prerequisites
 
 | Item | Notes |
 |------|--------|
-| Running stack | Typically `docker-compose up` (backend, frontend, Redis, worker, optional Mistral mock). |
-| PDF files | Place one or more `*.pdf` files under `tests/fixtures/pdf/`. If `PDF_FILE` is **not** set, every PDF in that directory is used (sorted); each smoke / FR / integration block runs once per file. If the directory is empty (or missing) and `PDF_FILE` is unset, scripts exit with a short message (Polish) asking you to add PDFs there. Set `PDF_FILE` to force a single file. |
+| Running stack | For `integration` / FR tests: typically `docker compose up` (backend, frontend, Redis, worker, optional Mistral mock). For `-m unit` only: **Redis** must accept TCP connections at `REDIS_URL` (default host port `6379`). |
+| PDF files | Place one or more `*.pdf` files under `tests/fixtures/pdf/`. If `PDF_FILE` is **not** set, every PDF in that directory is used (sorted); parametrized tests run once per file. If the directory is empty (or missing) and `PDF_FILE` is unset, PDF-dependent tests are **skipped**. Set `PDF_FILE` to force a single file. |
 | `GOOGLE_API_KEY` | Required for summaries (FR-5) and parts of the extraction tests; without it, tests that assert `summary` may fail. |
-| `MISTRAL_API_KEY` | Optional; Mistral tests also accept a clear “missing key” response (same idea as in `test_fr2.sh` / smoke). |
+| `MISTRAL_API_KEY` | Optional; Mistral tests also accept a clear “missing key” response (same idea as in FR-2 / smoke). |
 
-Scripts use **bash**, **curl**, and **Python 3** (JSON parsing).
+**Docker container names (local Compose):** `docker-compose.yml` sets Compose project name `async-pdf-proc` and explicit `container_name` values `async-pdf-proc-backend`, `async-pdf-proc-frontend`, `async-pdf-proc-redis`, and `async-pdf-proc-mistral-mock`. The `worker` service has no fixed `container_name`, so instances appear as `async-pdf-proc-worker-1`, `async-pdf-proc-worker-2`, … when scaled. Service DNS names inside the stack remain `backend`, `frontend`, `redis`, `worker`, and `mistral-mock`.
 
-**Important:** before running tests, download required PDF fixtures:
+**Download fixtures** (small PrinceXML sample PDFs):
 
 ```bash
-./tests/download_pdf_fixtures.sh
+python3 tests/download_pdf_fixtures.py
 ```
 
-The downloader pulls a compact set of lightweight PDFs (fast fixtures for local runs), including `drylab.pdf`, `example.pdf`, `flyer.pdf`, and `somatosensory.pdf` from PrinceXML sample documents. It supports:
+Options:
 
-- `--force` to re-download existing files
-- `--strict` to fail when any source is unavailable
+- `--force` — re-download even if files exist  
+- `--strict` — exit with non-zero status if any download fails  
+
+## Pytest suite
+
+| Item | Notes |
+|------|--------|
+| Dependencies | [`tests/requirements-pytest.txt`](../tests/requirements-pytest.txt) (includes [`backend/requirements.txt`](../backend/requirements.txt) for `unit` tests that import the FastAPI app) |
+| Runner | [`tests/run_pytest.py`](../tests/run_pytest.py) — creates `.pytest-venv/` (override with `PYTEST_VENV`), installs requirements, runs pytest |
+| Reports | `tests/report/junit.xml` (JUnit) and `tests/report/report.html` (self-contained HTML via `pytest-html`) |
+| Markers | See [`pytest.ini`](../pytest.ini). Highlights: `unit` (in-process ASGI; needs **Redis** reachable at `REDIS_URL`, default `redis://127.0.0.1:6379/0`), `streams` (Redis Streams + **Testcontainers**; needs **Docker**), `integration` (live HTTP), `smoke`, `fr1`…`fr7`, `multi` |
+| Worker retry (unit, PR-TR-7) | [`tests/test_worker_failure_classification.py`](../tests/test_worker_failure_classification.py) — `test_transient_retry_defers_xadd_until_after_backoff_task` checks that retry **`XADD`** runs only after the delayed backoff task (main consumer path not blocked). Mocks Redis and `_process_pdf_bytes`; patches **`app.worker._retry_backoff_sleep`** (avoids patching global `asyncio.sleep`). No Docker. |
+
+### Preflight (`run_pytest.py`, `run_fr_tests.py`)
+
+Both runners call into [`tests/_runner_util.py`](../tests/_runner_util.py) **before** creating the venv and invoking pytest. If a required dependency is missing, they exit with code **2** and print **`[preflight]`** lines (start Compose, or narrow markers / set `SKIP_STREAMS_TESTS`).
+
+**`run_pytest_preflight(argv)`** (used by `run_pytest.py`):
+
+- Parses **`-m` / `--markexpr`** when present (first `-m` wins).
+- **Backend** (`BACKEND_URL`, default `http://localhost:8000`) and **frontend** (`FRONTEND_URL`, default `http://localhost:5173`) are checked with a short TCP connect unless the marker expression selects **`-m unit`** without `integration`, `smoke`, `fr1`–`fr7`, or `multi`.
+- **Docker** (`docker info`) is required when the expression includes **`streams`**, or **`not unit`** (full suite and most subsets), unless **`SKIP_STREAMS_TESTS=1`** or the expression contains **`not streams`**.
+
+**`run_fr_preflight(order, pytest_tail)`** (used by `run_fr_tests.py`):
+
+- Always checks backend and frontend TCP reachability.
+- Requires Docker when tag **`fr3`** is in the resolved order (async Streams coverage) or when trailing pytest args select **`streams`**, unless **`SKIP_STREAMS_TESTS=1`**.
+
+[`tests/test_redis_streams_integration.py`](../tests/test_redis_streams_integration.py) registers a module-level **`filterwarnings`** for the Testcontainers **`@wait_container_is_ready`** deprecation so local output stays clean.
+
+**Run the full suite** (stack must be up for `integration` tests; `unit` tests only need Redis):
+
+```bash
+python3 tests/run_pytest.py
+```
+
+Examples:
+
+```bash
+python3 tests/run_pytest.py -m unit
+python3 tests/run_pytest.py -k "health or edges"
+python3 tests/run_pytest.py -m smoke
+```
+
+Extra arguments are forwarded to pytest.
+
+### Redis Streams (`streams` marker, PR-TR-14)
+
+[`tests/test_redis_streams_integration.py`](../tests/test_redis_streams_integration.py) starts a disposable **Redis 7** container via **Testcontainers** and exercises consumer groups, `XREADGROUP` / `XACK`, `XAUTOCLAIM` on stale pending entries, a DLQ-style `XADD` + primary `XACK`, and duplicate `XGROUP CREATE` (`BUSYGROUP`).
+
+- **Requires:** a working Docker daemon (same as CI after `docker compose` is available on the host).
+- **Skip:** `SKIP_STREAMS_TESTS=1` or `python3 tests/run_pytest.py -m "not streams"` if you cannot run Docker locally.
+- **Run only Streams tests:** `python3 tests/run_pytest.py -m streams`
+
+### FR-only runner (ordered subprocesses)
+
+[`tests/run_fr_tests.py`](../tests/run_fr_tests.py) reproduces the old `run_all_fr_tests.sh` behavior: one pytest invocation per tag so order is deterministic. The `multi` tag runs with `PDF_FILE` removed so all fixtures in `tests/fixtures/pdf/` are visible.
+
+```bash
+python3 tests/run_fr_tests.py
+python3 tests/run_fr_tests.py --reverse
+python3 tests/run_fr_tests.py --shuffle
+python3 tests/run_fr_tests.py --order fr7,fr5,fr1
+python3 tests/run_fr_tests.py --only fr3,fr5,multi
+python3 tests/run_fr_tests.py --only fr1 -- -x
+```
 
 ## Environment variables
-
-Shared by most FR and integration tests (see `tests/lib/fr_common.sh`):
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `BACKEND_URL` | `http://localhost:8000` | Backend API base URL |
 | `FRONTEND_URL` | `http://localhost:5173` | Frontend URL (`/api` proxy, FR-7) |
-| `PDF_FILE` | *(unset)* | If set, only this path is used. If unset, all `*.pdf` files under `tests/fixtures/pdf/` are discovered (case-insensitive); tests repeat for each file. |
-| `PARSER` | `pypdf` | Async multi-PDF batch in `test_integration_all_fr.sh` and `test_multi_pdf_all_fixtures.sh` (`pypdf`, `gemini-2.5-flash`, or `mistral`). |
+| `PDF_FILE` | *(unset)* | If set, only this path is used for parametrized tests. If unset, all `*.pdf` under `tests/fixtures/pdf/` are used. |
+| `PARSER` | `pypdf` | Parser for the **multi-PDF async** test (`pypdf`, `gemini-2.5-flash-pdf`, `gemini-2.5-flash-text`, `gemini-2.5-flash`, `mistral`, or `mistral-ocr`). |
+| `E2E_HTTP_TIMEOUT` | `180` | Default `httpx` timeout (seconds). |
+| `PYTEST_VENV` | *(unset → `.pytest-venv/`)* | Virtualenv path used by `run_pytest.py` / `run_fr_tests.py`. |
 
-The smoke test (`run_smoke_tests.sh`) uses the same `BACKEND_URL`, `FRONTEND_URL`, and PDF discovery rules via `tests/lib/fr_common.sh`.
+## What each area covers
 
-## Script overview
+| Area | Pytest modules |
+|------|----------------|
+| Health | `test_health.py` — backend `/api/health`, frontend `/`, frontend `/api/health` |
+| Smoke | `test_smoke.py` — extract, parsers, cache hint, async job, Gemini answer |
+| FR-1 … FR-7 | `test_fr1_upload.py` … `test_fr7_proxy.py` (markers `fr1`…`fr7`) |
+| Integration edges | `test_integration_edges.py` — unknown job 404, empty file, no files |
+| Integration sweep | `test_integration_per_pdf.py` — broad sync + async checks per PDF |
+| Multi-PDF all fixtures | `test_multi_pdf_all_fixtures.py` (marker `multi`) — one sync + one async request with every fixture PDF |
 
-### Smoke — quick end-to-end pass
+Shared helpers: `tests/support/checks.py`, `tests/support/http_api.py`, `tests/support/pdf_fixtures.py`, `tests/conftest.py`.
 
-| Script | Description |
-|--------|-------------|
-| [`tests/run_smoke_tests.sh`](../tests/run_smoke_tests.sh) | One run: backend and frontend health; for **each** discovered fixture PDF: single- and multi-file extraction, parser selection (`pypdf`, `gemini-2.5-flash`, `mistral`), Redis cache observation, one async job (FR-3); then frontend proxy health and `POST /api/gemini/answer`. |
+## CI
 
-**Run from the project root:**
+[`scripts/ci_build_and_test.sh`](../scripts/ci_build_and_test.sh) builds and starts the Compose stack, waits until services are ready, runs `python3 tests/download_pdf_fixtures.py --force --strict`, then `python3 tests/run_pytest.py`. GitHub Actions uploads `tests/report/` as the **pytest-reports** artifact.
 
-```bash
-./tests/run_smoke_tests.sh
-```
+**Stack readiness**
 
-With overrides:
+- If `docker compose up` supports **`--wait`**, the script uses **`up -d --build --wait --wait-timeout 120`** so Compose blocks until healthchecks pass (when defined).
+- Regardless of `--wait`, the script then polls with **`curl`** until:
+  - `http://127.0.0.1:8000/api/health` (backend), and  
+  - `http://127.0.0.1:5173/api/health` (frontend Vite proxy to backend health)  
+  return HTTP 200. **`curl`** must be on `PATH`.
+- Tune polling (optional):
 
-```bash
-BACKEND_URL=http://localhost:8000 \
-FRONTEND_URL=http://localhost:5173 \
-PDF_FILE=/path/to/file.pdf \
-./tests/run_smoke_tests.sh
-```
-
-Exit code: `0` when `FAIL=0`, otherwise `1`.
-
----
-
-### Per-requirement tests (FR-1 … FR-7)
-
-| Script | Scope |
-|--------|--------|
-| [`test_fr1.sh`](../tests/test_fr1.sh) | FR-1: multiple files in one request + `parser` field |
-| [`test_fr2.sh`](../tests/test_fr2.sh) | FR-2: `pypdf`, `gemini-2.5-flash`, `mistral` |
-| [`test_fr3.sh`](../tests/test_fr3.sh) | FR-3: async `POST /api/jobs/extract`, poll until `done` |
-| [`test_fr4.sh`](../tests/test_fr4.sh) | FR-4: `pages[]` in sync response |
-| [`test_fr5.sh`](../tests/test_fr5.sh) | FR-5: non-empty `summary` (Gemini) |
-| [`test_fr6.sh`](../tests/test_fr6.sh) | FR-6: timestamps, `sha256`, `parser` in sync result |
-| [`test_fr7.sh`](../tests/test_fr7.sh) | FR-7: poll `GET /api/jobs/{id}` + optional frontend proxy |
-| [`test_multi_pdf_all_fixtures.sh`](../tests/test_multi_pdf_all_fixtures.sh) | **Multi-PDF:** one `POST /api/pdf/extract` and one `POST /api/jobs/extract`, each attaching **every** discovered fixture PDF (requires ≥2 PDFs; otherwise skips with exit 0). Async parser: `PARSER` (default `pypdf`). |
-
-**Run all:**
-
-```bash
-./tests/run_all_fr_tests.sh
-```
-
-**`run_all_fr_tests.sh` options:**
-
-- `--reverse` — order fr7 … fr1, then `multi`  
-- `--shuffle` — random order (includes `multi`)  
-- `--order fr7,fr5,…` — custom order (include `multi` to run the all-fixtures multi-PDF script)  
-- `--only fr3,fr5` — subset only (`--only multi` runs only that script)  
-
-`./tests/run_all_fr_tests.sh` runs FR tags **once per fixture PDF**, then runs tag **`multi` once** (all PDFs in one sync + one async request), unless you omit `multi` from `--order` / `--only`.
-
-Shared JSON / poll helpers and PDF fixture discovery: [`tests/lib/fr_common.sh`](../tests/lib/fr_common.sh). Smoke tests keep additional inline check helpers in `run_smoke_tests.sh`.
-
----
-
-### Integration test (“all FRs”)
-
-| Script | Description |
-|--------|-------------|
-| [`tests/test_integration_all_fr.sh`](../tests/test_integration_all_fr.sh) | One run: job API edge cases (404, empty file, no files), then FR-1 and FR-4…FR-7 on sync and async paths for **each** discovered fixture PDF (including `pages[]`, `summary`, timestamps, `sha256` / `parser` on job results), FR-2, FR-7 (proxy), optional **multi-PDF async batch** when at least two PDFs exist under `tests/fixtures/pdf/` (posts all discovered files). Override batch parser with `PARSER`. |
-
-```bash
-./tests/test_integration_all_fr.sh
-# Optional: exercise batch with another parser
-PARSER=gemini-2.5-flash ./tests/test_integration_all_fr.sh
-```
-
-This is the broadest single-script end-to-end requirement sweep; slower than an individual `test_frN.sh`, but one report with many assertions.
-
----
-
-## What to run when
-
-| Situation | Suggestion |
-|-----------|------------|
-| Quick check after containers start | `./tests/run_smoke_tests.sh` |
-| Requirement-by-requirement regression or custom order | `./tests/run_all_fr_tests.sh` (+ options) |
-| Single report covering FR-1…FR-7, edges, optional multi-file async batch | `./tests/test_integration_all_fr.sh` (fixture PDFs live under `tests/fixtures/pdf/`) |
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CI_STACK_READY_TIMEOUT_SECONDS` | `120` | Max seconds to wait for each readiness URL |
+| `CI_STACK_READY_POLL_INTERVAL_SECONDS` | `2` | Sleep between polls |
 
 ## Troubleshooting
 
-- **No PDF fixtures** — add at least one `*.pdf` under `tests/fixtures/pdf/`, or set `PDF_FILE` to a specific path.  
-- **Job timeout / `failed`** — ensure the worker (`pdf-proc-worker`) and Redis are running; check Compose logs.  
+- **No PDF fixtures** — run `python3 tests/download_pdf_fixtures.py` or add PDFs under `tests/fixtures/pdf/`, or set `PDF_FILE`.  
+- **Job timeout / `failed`** — ensure the `worker` service and Redis are running; check Compose logs.  
 - **Empty `summary` / Gemini errors** — `GOOGLE_API_KEY` on the backend; API quotas or restrictions on Google’s side.  
-- **FR-7 / proxy** — the frontend must listen on `FRONTEND_URL`; backend-only setups may show a warning without failing the whole `test_fr7.sh` (depends on the script).  
+- **FR-7 / proxy** — the frontend must listen on `FRONTEND_URL`; if the proxy path is wrong, related checks may **skip** without failing the suite.  
 - **Mistral** — without a key, tests may pass on the “expected missing-key message” instead of full extraction.
 
 ## Related files
@@ -133,8 +143,8 @@ This is the broadest single-script end-to-end requirement sweep; slower than an 
 - [`docs/REQUIREMENTS.md`](REQUIREMENTS.md) — requirements (including FR-1…FR-7).  
 - [`docs/IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) — implementation vs requirements.  
 - [`docs/TEST_CHECKLIST.md`](TEST_CHECKLIST.md) — manual checklist.  
-- [`README.md`](../README.md) — project overview; points here for testing details.
+- [`README.md`](../README.md) — project overview.
 
 ---
 
-**Async PDF Processor** v.0.0.1 · 26 March 2026 · Code author: Arkadiusz Czerwinski
+**Async PDF Processor** v.0.0.2 · 15 April 2026 · Code author: Arkadiusz Czerwinski

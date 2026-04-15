@@ -6,13 +6,13 @@ Date: `__________`
 Tester: `__________`  
 Environment: `local / staging / other: __________`
 
-**Automated regression (optional):** shell scripts under `tests/` are described in [`docs/TESTS.md`](TESTS.md) (smoke, FR-1..FR-7, full integration).
+**Automated regression (optional):** primary suite is **pytest** via `python3 tests/run_pytest.py` (see [`docs/TESTS.md`](TESTS.md): markers, Streams tests, FR-ordered runner).
 
 ---
 
 ## 1) Preconditions
 
-- [ ] Docker Compose stack is running (`pdf-proc-backend`, `pdf-proc-frontend`, `pdf-proc-worker`, `redis`, and `mistral-mock` as configured)
+- [ ] Docker Compose stack is running (`async-pdf-proc-backend`, `async-pdf-proc-frontend`, `async-pdf-proc-redis`, `async-pdf-proc-mistral-mock`, workers `async-pdf-proc-worker-<n>` per `docker-compose.yml`)
 - [ ] `GOOGLE_API_KEY` is configured
 - [ ] At least one sample PDF is under `tests/fixtures/pdf/` (copy your own files; example path for commands below: `tests/fixtures/pdf/drylab.pdf`)
 
@@ -28,7 +28,7 @@ Environment: `local / staging / other: __________`
 
 ## 3) PDF Extraction Tests
 
-Commands below assume the **project root** (repository root, e.g. cloned `async-pdf-processor/`). Place sample PDFs under `tests/fixtures/pdf/` (not necessarily committed); example filenames in curl commands use `drylab.pdf` if present.
+Commands below assume the **repository root** (directory containing `docker-compose.yml`; clone folder name may differ). Place sample PDFs under `tests/fixtures/pdf/` (not necessarily committed); example filenames in curl commands use `drylab.pdf` if present.
 
 - [ ] **Single-file extraction** works
   - Command:
@@ -45,8 +45,10 @@ Commands below assume the **project root** (repository root, e.g. cloned `async-
 
 - [ ] **Parser selection (FR-2)** works for extraction
   - [ ] `parser=pypdf` returns extracted plain text
-  - [ ] `parser=gemini-2.5-flash` returns markdown-oriented output
+  - [ ] `parser=gemini-2.5-flash-text` (or legacy `parser=gemini-2.5-flash`) returns markdown from the PyPDF→Gemini formatter
+  - [ ] `parser=gemini-2.5-flash-pdf` returns markdown from Gemini native inline PDF input
   - [ ] `parser=mistral` returns markdown-oriented output (local `mistral-mock` by default)
+  - [ ] `parser=mistral-ocr` returns markdown from raster + vision mock (one request per page)
   - [ ] (Optional) with real external Mistral API configured, `parser=mistral` still returns markdown output
 - [ ] **FR-4 Parsed output per page** works
   - [ ] Response contains `results[0].pages` with one entry per PDF page (best effort)
@@ -154,4 +156,4 @@ Notes:
 
 ---
 
-**Async PDF Processor** v.0.0.1 · 26 March 2026 · Code author: Arkadiusz Czerwinski
+**Async PDF Processor** v.0.0.2 · 15 April 2026 · Code author: Arkadiusz Czerwinski

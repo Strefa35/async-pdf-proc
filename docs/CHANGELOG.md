@@ -1,0 +1,96 @@
+# Changelog
+
+All notable changes to **Async PDF Processor** are described in this file.  
+Versions follow **v.0.0.x** labels used in the UI (`frontend/src/appMeta.ts`) and documentation footers.
+
+**Code author:** Arkadiusz Czerwinski
+
+---
+
+## v.0.0.2 — 15 April 2026
+
+Hardening and product-clarity release. Closes the gaps listed under “Top Rejection Reasons” in `docs/TODO.md` (evaluation of the earlier delivery) and aligns implementation with `docs/IMPLEMENTATION_STATUS.md` (Sections 1–2 and Section 9).
+
+### Parsing and product clarity
+
+- Explicit parser identifiers end-to-end (API, worker, frontend, locales): `pypdf`, `gemini-2.5-flash-pdf`, `gemini-2.5-flash-text`, legacy `gemini-2.5-flash`, `mistral`, `mistral-ocr`.
+- Native Gemini PDF path (`gemini-2.5-flash-pdf`, inline PDF bytes) without silent fallback to text-only formatting; oversized PDFs return **413** where applicable.
+- Formatter path (`gemini-2.5-flash-text`: PyPDF text → Gemini markdown) documented; migration notes in `README.md`.
+- Scanned / image-heavy PDF behavior documented; tests for low-text cases (e.g. `tests/test_pr_fr_scanned_pdf.py`).
+- `mistral-ocr`: PyMuPDF rasters → Mistral vision per page (`MISTRAL_OCR_MAX_PAGES`, `MISTRAL_OCR_RASTER_ZOOM`); mock supports vision payloads for local runs.
+
+### Concurrency, backpressure, and resilience (API + worker)
+
+- Blocking PyPDF / PyMuPDF CPU work off the asyncio event loop via a bounded PDF CPU pool **`_get_pdf_cpu_executor()`** (`BLOCKING_POOL_MAX_WORKERS`, `_run_blocking` / `_run_blocking_timed`); blocking Gemini SDK calls use **`_get_gemini_blocking_executor()`** — a **dedicated** pool when **`GEMINI_POOL_MAX_WORKERS`** is a positive integer, otherwise Gemini shares the PDF CPU pool. **`_init_blocking_executors()`** eagerly creates the pool(s) at FastAPI startup and in the worker **`main()`**.
+- LLM capacity: `LLM_MAX_INFLIGHT`, `LLM_SLOT_ACQUIRE_TIMEOUT_SECONDS`; **503** + `Retry-After` when saturated; per-file errors on multi-file sync under pressure.
+- Multi-file synchronous extract: bounded parallelism (`SYNC_EXTRACT_MAX_CONCURRENT`, `asyncio.gather`).
+- Timeouts: PyPDF parse, Mistral HTTP; **`_gemini_generate_content`** passes **`GEMINI_CALL_TIMEOUT_SECONDS`** into the **`google-genai`** client via **`HttpOptions`** (timeout in milliseconds; stuck HTTP can fail inside the worker thread), plus asyncio **`wait_for`** on the async side (see `.env.example`).
+- Worker uses the same processing and LLM slot behavior as the API; best-effort **`XACK`** after terminal outcomes tolerates the same **transient** transport exceptions as the Redis retry path (**`_safe_xack`** aligns with the retry classifier, not only `RedisConnectionError`).
+
+### Redis Streams queue hardening
+
+- Stream semantics documented: `docs/STREAMS_CONTRACT.md`.
+- Retries with backoff/jitter; `attempt` / `process_attempt` / `correlation_id` on jobs and stream fields.
+- **Transient retry backoff** does not block the main consumer loop: with attempts remaining, the worker schedules **`asyncio.create_task`** for **`sleep` → `XADD` → `XACK`** (same ordering as before for crash safety) so other stream deliveries keep draining during backoff.
+- **`_retry_backoff_sleep`** wraps **`asyncio.sleep`** for the delayed path so unit tests can patch backoff without affecting global **`asyncio.sleep`**; in-flight retry tasks are retained in a module-level set until completion so they are not garbage-collected before **`XADD` / `XACK`**.
+- Unit coverage: `tests/test_worker_failure_classification.py::test_transient_retry_defers_xadd_until_after_backoff_task`.
+- Pending reclaim (`XAUTOCLAIM`, `JOB_STREAM_CLAIM_IDLE_MS`); DLQ after max reclaims (`JOB_MAX_RECLAIMS_PER_MESSAGE`).
+- Dead-letter stream `REDIS_STREAM_DLQ`; replay policy in the streams contract.
+- Structured JSON logs (`backend/app/worker_observability.py`).
+- Prometheus `/metrics` on worker (`WORKER_METRICS_PORT`, default `9464`); `XPENDING`-based gauges.
+- Optional OTLP tracing when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+- Multiple workers (`docker compose up --scale worker=N`); idempotent handling under duplicate delivery.
+
+### Testing and automation
+
+- pytest as primary integration suite (`python3 tests/run_pytest.py`, reports under `tests/report/`).
+- Redis Streams tests with Testcontainers (`tests/test_redis_streams_integration.py`, `@pytest.mark.streams`); see `docs/TESTS.md`.
+- FR-ordered runner: `python3 tests/run_fr_tests.py`.
+- PDF fixtures under `tests/fixtures/pdf/`; `tests/download_pdf_fixtures.py`.
+- CI helper: `scripts/ci_build_and_test.sh` — Compose build, optional Compose **`--wait`** when supported, **`curl`**-based readiness for backend and frontend proxy health (tunables **`CI_STACK_READY_TIMEOUT_SECONDS`**, **`CI_STACK_READY_POLL_INTERVAL_SECONDS`** in **`docs/TESTS.md`**), strict fixture download, pytest.
+- **`tests/test_pr_fr_gemini_paths.py`**: asserts **`HttpOptions`** / SDK timeout on **`_gemini_generate_content`**; asserts **`_get_gemini_blocking_executor()`** shares the PDF CPU pool when **`GEMINI_POOL_MAX_WORKERS`** is unset and uses a **separate** pool when it is set.
+
+### Documentation
+
+- Post-review tables Section 9.1–9.2 in `docs/IMPLEMENTATION_STATUS.md` track closure of PR-FR-* / PR-TR-* items for this release.
+- **Docker Compose:** standardized container names on the `async-pdf-proc-*` prefix (`docker-compose.yml`: project `name`, explicit `container_name` for backend/frontend/redis/mistral-mock; workers `async-pdf-proc-worker-<n>`). `README.md`, `docs/ARCHITECTURE.md`, `docs/TEST_CHECKLIST.md`, `docs/TESTS.md`, `docs/STREAMS_CONTRACT.md`, and `docs/IMPLEMENTATION_STATUS.md` updated; default worker log / OTEL service id `async-pdf-proc-worker` in `backend/app/worker_observability.py` and `.env.example`.
+
+### Follow-up
+
+- **Gemini SDK:** `google-generativeai` replaced by **`google-genai`**. **`_gemini_generate_content`** builds a short-lived **`google.genai.Client`** and sets **`HttpOptions(timeout=…)`** in milliseconds from **`GEMINI_CALL_TIMEOUT_SECONDS`**; native PDF payloads use **`Part.from_bytes`** / **`Part.from_text`** types.
+- **FastAPI lifecycle:** Redis connect, **`ping`**, and blocking executor init/shutdown use an **`asynccontextmanager` `lifespan`** on the **`FastAPI`** app (replacing deprecated **`@app.on_event("startup")` / `"shutdown"`** hooks).
+- **Test CLI preflight:** `tests/_runner_util.py` — **`run_pytest_preflight`** (marker-aware TCP + Docker checks) and **`run_fr_preflight`** (always checks HTTP; Docker when **`fr3`** or **`streams`** is selected). Failures exit **2** with **`[preflight]`** remediation hints; see **`docs/TESTS.md`**.
+- **Streams tests:** `tests/test_redis_streams_integration.py` filters Testcontainers **`@wait_container_is_ready`** deprecation warnings so the suite stays readable.
+
+---
+
+## v.0.0.1 — 26 March 2026
+
+First integrated delivery (**baseline**, before the v.0.0.2 hardening pass). Summarized from the “Top Strengths” in `docs/TODO.md` (evaluation context).
+
+### Delivered scope
+
+- Docker Compose stack: **backend**, **worker**, **Redis**, **frontend**, and **mistral-mock** for local Mistral-compatible testing.
+- End-to-end upload → extract → summarize flow with Redis caching by SHA256.
+- **Redis Streams** async jobs (`POST /api/jobs/extract`, `GET /api/jobs/{job_id}`), worker consumer group, job lifecycle.
+- Multi-file upload, parser selection in API/UI, Gemini summarization and Q&A, multilingual frontend (`frontend/src/locales/*`).
+- Test automation and smoke/integration verification (later largely superseded by pytest-first tooling in v.0.0.2).
+
+### Known limitations (addressed in v.0.0.2)
+
+- Advanced parsing was effectively **Gemini-as-formatter over PyPDF text**, not a clearly separated native-PDF vs formatter product story.
+- Blocking PDF/LLM work in async contexts with limited concurrency controls and timeouts.
+- Queue path without full retry/reclaim/DLQ story and weaker operational observability.
+- Heavy reliance on shell/curl for integration checks instead of a pytest-centric suite.
+
+---
+
+## References
+
+| Topic | Document |
+|--------|----------|
+| Task spec and v.0.0.1 evaluation | `docs/TODO.md` |
+| Requirement matrix and Section 9 backlog | `docs/IMPLEMENTATION_STATUS.md` |
+| Streams semantics | `docs/STREAMS_CONTRACT.md` |
+| How to run tests | `docs/TESTS.md` |
+| Operator / developer guide | `README.md` |

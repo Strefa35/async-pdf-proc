@@ -81,8 +81,8 @@ de,
 ### Step 4: Rebuild and test
 
 ```bash
-cd async-pdf-processor
-docker-compose up -d --build --force-recreate frontend
+# From the repository root (directory containing docker-compose.yml)
+docker compose up -d --build --force-recreate frontend
 ```
 
 Then verify:
@@ -114,4 +114,4 @@ Then verify:
 
 ---
 
-**Async PDF Processor** v.0.0.1 · 26 March 2026 · Code author: Arkadiusz Czerwinski
+**Async PDF Processor** v.0.0.2 · 15 April 2026 · Code author: Arkadiusz Czerwinski

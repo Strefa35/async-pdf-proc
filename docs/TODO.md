@@ -25,6 +25,8 @@ The backend should take the uploaded PDF, the desired parser from above, then pa
 
 # Helpful:
 - Google Gemini MODEL_ID = "gemini-2.5-flash"
+- Parser ids `gemini-2.5-flash-pdf` (native inline PDF) vs `gemini-2.5-flash-text` / legacy `gemini-2.5-flash` (PyPDF text formatter) are documented in `README.md` and `docs/REQUIREMENTS.md`.
+- Parser `mistral-ocr` (PyMuPDF raster + Mistral vision per page) is documented alongside `mistral` (text formatter).
 - If some requirements are not clear, then make reasonable assumptions and move forward with implementation
 - If you're stuck on some technicality, then feel free to work around it any way you can, and proceed forward with implementation
 
@@ -37,6 +39,21 @@ The backend should take the uploaded PDF, the desired parser from above, then pa
 - Document processing via Mistral OCR
 - Frontend
 
+
+# Evaluation v.0.0.1: What's Missing
+
+## Top Strengths
+- Delivered a complete Dockerized solution with backend, worker, Redis, frontend, and a local Mistral-compatible mock.
+- End-to-end flow works in practice and passed local smoke/integration verification.
+- Implemented a real Redis Streams-based async path with job lifecycle and useful test automation.
+
+## Top Rejection Reasons
+- The advanced parsing requirement is not truly met: Gemini is not used as a native PDF parser, only as a formatter over PyPDF text.
+- Async/backend engineering is below senior expectations: blocking PDF/LLM work happens in async contexts, with limited concurrency and backpressure controls.
+- Queue hardening is incomplete: no retry strategy, no pending reclaim, no dead-letter handling, and weak operational observability
+- integration tests heavily use barely readable sh scripts. why not just use python?
+- nothing special in the worker processing loop: no retry, no DLQ, blocking processing
+
 ---
 
-**Async PDF Processor** v.0.0.1 · 26 March 2026 · Code author: Arkadiusz Czerwinski
+**Async PDF Processor** v.0.0.2 · 15 April 2026 · Code author: Arkadiusz Czerwinski
