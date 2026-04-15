@@ -19,7 +19,7 @@ from app.main import (
     REDIS_STREAM_NAME,
     REDIS_URL,
     _blob_b64_key,
-    _get_blocking_executor,
+    _init_blocking_executors,
     _job_key,
     _process_pdf_bytes,
 )
@@ -48,6 +48,9 @@ WORKER_XREAD_COUNT = max(1, int(os.getenv("WORKER_XREADGROUP_COUNT", "5")))
 WORKER_XREAD_BLOCK_MS = max(100, int(os.getenv("WORKER_XREADGROUP_BLOCK_MS", "5000")))
 WORKER_METRICS_PORT = int(os.getenv("WORKER_METRICS_PORT", "9464"))
 JOB_RETRY_BASE_DELAY = max(0.05, float(os.getenv("JOB_RETRY_BASE_DELAY_SECONDS", "1")))
+
+# Holds in-flight delayed retry tasks so they are not GC'd before completion (asyncio.create_task).
+_retry_reenqueue_tasks: set[asyncio.Task[None]] = set()
 
 
 def _decode_field(v: Any) -> str:
@@ -80,8 +83,18 @@ def _backoff_seconds(attempt: int) -> float:
     return cap + jitter
 
 
+# Transient client / transport failures for Redis and similar I/O (matches retry policy).
+_TRANSIENT_REDIS_CLIENT_EXC: tuple[type[BaseException], ...] = (
+    RedisConnectionError,
+    RedisTimeoutError,
+    asyncio.TimeoutError,
+    OSError,
+    ConnectionError,
+)
+
+
 def classify_failure(exc: BaseException) -> tuple[bool, str]:
-    if isinstance(exc, (RedisConnectionError, RedisTimeoutError, asyncio.TimeoutError, OSError, ConnectionError)):
+    if isinstance(exc, _TRANSIENT_REDIS_CLIENT_EXC):
         return True, type(exc).__name__
     if isinstance(exc, LlmCapacityExceededError):
         return True, "LlmCapacityExceededError"
@@ -184,7 +197,7 @@ async def _append_dlq(
 async def _safe_xack(redis: Redis, msg_id: str) -> None:
     try:
         await redis.xack(REDIS_STREAM_NAME, REDIS_CONSUMER_GROUP, msg_id)
-    except RedisConnectionError:
+    except _TRANSIENT_REDIS_CLIENT_EXC:
         pass
 
 
@@ -197,6 +210,83 @@ async def _refresh_pending_metric(redis: Redis) -> None:
             observe_pending(REDIS_STREAM_NAME, float(info[0]))
     except Exception:
         pass
+
+
+async def _retry_backoff_sleep(seconds: float) -> None:
+    """Backoff delay for delayed re-enqueue (separate from asyncio.sleep for narrow test patching)."""
+    await asyncio.sleep(seconds)
+
+
+async def _delayed_retry_reenqueue(
+    redis: Redis,
+    *,
+    msg_id: str,
+    delay: float,
+    next_attempt: int,
+    job_id: str,
+    parser: str,
+    filename: str,
+    language: str,
+    correlation_id: str,
+    consumer: str,
+) -> None:
+    """Sleep off the consumer hot path, then XADD + XACK (same durability as inline sleep + xadd + ack)."""
+    try:
+        await _retry_backoff_sleep(delay)
+        await redis.xadd(
+            REDIS_STREAM_NAME,
+            {
+                "job_id": job_id,
+                "parser": parser,
+                "filename": filename,
+                "language": language,
+                "attempt": str(next_attempt),
+                "correlation_id": correlation_id,
+            },
+        )
+        metric_retry()
+        await _safe_xack(redis, msg_id)
+    except Exception as e:
+        log_json(
+            "job_retry_reenqueue_error",
+            job_id=job_id,
+            msg_id=msg_id,
+            correlation_id=correlation_id,
+            error=str(e),
+            delay_seconds=delay,
+            consumer=consumer,
+        )
+
+
+def _spawn_delayed_retry_reenqueue(
+    redis: Redis,
+    *,
+    msg_id: str,
+    delay: float,
+    next_attempt: int,
+    job_id: str,
+    parser: str,
+    filename: str,
+    language: str,
+    correlation_id: str,
+    consumer: str,
+) -> None:
+    task = asyncio.create_task(
+        _delayed_retry_reenqueue(
+            redis,
+            msg_id=msg_id,
+            delay=delay,
+            next_attempt=next_attempt,
+            job_id=job_id,
+            parser=parser,
+            filename=filename,
+            language=language,
+            correlation_id=correlation_id,
+            consumer=consumer,
+        )
+    )
+    _retry_reenqueue_tasks.add(task)
+    task.add_done_callback(_retry_reenqueue_tasks.discard)
 
 
 async def _handle_one_delivery(
@@ -385,20 +475,20 @@ async def _handle_one_delivery(
                     delay_seconds=delay,
                     consumer=consumer,
                 )
-                await asyncio.sleep(delay)
-                await redis.xadd(
-                    REDIS_STREAM_NAME,
-                    {
-                        "job_id": job_id,
-                        "parser": parser,
-                        "filename": filename,
-                        "language": language,
-                        "attempt": str(next_attempt),
-                        "correlation_id": correlation_id,
-                    },
+                _spawn_delayed_retry_reenqueue(
+                    redis,
+                    msg_id=msg_id,
+                    delay=delay,
+                    next_attempt=next_attempt,
+                    job_id=job_id,
+                    parser=parser,
+                    filename=filename,
+                    language=language,
+                    correlation_id=correlation_id,
+                    consumer=consumer,
                 )
-                metric_retry()
-                await _safe_xack(redis, msg_id)
+                metric_observe_duration(time.perf_counter() - t0)
+                return
             elif transient:
                 err = f"Max process attempts exceeded ({JOB_MAX_PROCESS_ATTEMPTS}): {e}"
                 await _append_dlq(
@@ -489,7 +579,7 @@ async def _drain_autoclaim(redis: Redis, *, consumer: str) -> None:
 
 
 async def main() -> None:
-    _get_blocking_executor()
+    _init_blocking_executors()
     init_worker_metrics(WORKER_METRICS_PORT)
 
     redis = Redis.from_url(REDIS_URL, decode_responses=True)

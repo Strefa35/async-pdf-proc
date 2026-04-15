@@ -48,6 +48,24 @@ JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", str(60 * 60 * 24 * 7)))  # 7 
 BLOCKING_POOL_MAX_WORKERS = int(os.getenv("BLOCKING_POOL_MAX_WORKERS", "8"))
 
 
+def _gemini_dedicated_pool_max_workers() -> int | None:
+    """
+    When set to a positive integer, blocking Gemini SDK calls use a dedicated pool
+    so pathological PyMuPDF/PyPDF work cannot exhaust threads used for generate_content.
+    When unset or non-positive, Gemini shares the PDF CPU pool (legacy behavior).
+    """
+    raw = os.getenv("GEMINI_POOL_MAX_WORKERS", "").strip()
+    if not raw:
+        return None
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    return max(1, v)
+
+
 def _env_int_min(name: str, default: int, *, minimum: int = 1) -> int:
     raw = os.getenv(name, str(default))
     try:
@@ -136,7 +154,7 @@ def _env_float_positive(name: str, default: str) -> float:
     return v
 
 
-# Wall-clock caps for blocking work (Gemini SDK runs in a thread pool; asyncio.wait_for bounds wait time).
+# Gemini: HTTP deadline via SDK RequestOptions(_gemini_generate_content). PDF/CPU: asyncio.wait_for only.
 GEMINI_CALL_TIMEOUT_SECONDS = _env_float_positive("GEMINI_CALL_TIMEOUT_SECONDS", "180")
 PDF_PARSE_TIMEOUT_SECONDS = _env_float_positive("PDF_PARSE_TIMEOUT_SECONDS", "120")
 def _gemini_inline_pdf_max_bytes() -> int:
@@ -156,33 +174,86 @@ MISTRAL_HTTPX_TIMEOUT = httpx.Timeout(
 
 MISTRAL_OCR_MAX_PAGES = _env_int_min("MISTRAL_OCR_MAX_PAGES", 25, minimum=1)
 
-_blocking_executor: ThreadPoolExecutor | None = None
+_pdf_cpu_executor: ThreadPoolExecutor | None = None
+_gemini_blocking_executor: ThreadPoolExecutor | None = None
+
+
+def _get_pdf_cpu_executor() -> ThreadPoolExecutor:
+    """
+    Bounded thread pool for CPU-heavy PyPDF / PyMuPDF work.
+    Shared by the FastAPI app and the worker process (separate processes each get their own pool).
+    """
+    global _pdf_cpu_executor
+    if _pdf_cpu_executor is None:
+        _pdf_cpu_executor = ThreadPoolExecutor(
+            max_workers=max(1, BLOCKING_POOL_MAX_WORKERS),
+            thread_name_prefix="pdf-cpu-",
+        )
+    return _pdf_cpu_executor
+
+
+def _get_gemini_blocking_executor() -> ThreadPoolExecutor:
+    """
+    Thread pool for synchronous Gemini SDK calls. Uses a dedicated pool when
+    GEMINI_POOL_MAX_WORKERS is set; otherwise shares the PDF CPU pool.
+    """
+    n = _gemini_dedicated_pool_max_workers()
+    if n is None:
+        return _get_pdf_cpu_executor()
+    global _gemini_blocking_executor
+    if _gemini_blocking_executor is None:
+        _gemini_blocking_executor = ThreadPoolExecutor(
+            max_workers=n,
+            thread_name_prefix="gemini-blocking-",
+        )
+    return _gemini_blocking_executor
 
 
 def _get_blocking_executor() -> ThreadPoolExecutor:
-    """
-    Bounded thread pool for CPU-heavy PyPDF work and blocking Gemini SDK calls.
-    Shared by the FastAPI app and the worker process (separate processes each get their own pool).
-    """
-    global _blocking_executor
-    if _blocking_executor is None:
-        _blocking_executor = ThreadPoolExecutor(
-            max_workers=max(1, BLOCKING_POOL_MAX_WORKERS),
-            thread_name_prefix="pdf-blocking-",
-        )
-    return _blocking_executor
+    """Backward-compatible alias for the PDF CPU thread pool."""
+    return _get_pdf_cpu_executor()
+
+
+def _init_blocking_executors() -> None:
+    """Eagerly create executor(s) used for blocking PDF and Gemini work."""
+    _get_pdf_cpu_executor()
+    _get_gemini_blocking_executor()
 
 
 def _shutdown_blocking_executor() -> None:
-    global _blocking_executor
-    if _blocking_executor is not None:
-        _blocking_executor.shutdown(wait=True, cancel_futures=False)
-        _blocking_executor = None
+    global _pdf_cpu_executor, _gemini_blocking_executor
+    if _pdf_cpu_executor is not None:
+        _pdf_cpu_executor.shutdown(wait=True, cancel_futures=False)
+        _pdf_cpu_executor = None
+    if _gemini_blocking_executor is not None:
+        _gemini_blocking_executor.shutdown(wait=True, cancel_futures=False)
+        _gemini_blocking_executor = None
 
 
-async def _run_blocking(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+def _gemini_generate_content(model: Any, contents: Any) -> Any:
+    """
+    Invoke Gemini ``generate_content`` with an SDK-level HTTP deadline when supported.
+    This lets stuck requests fail inside the worker thread instead of relying only on
+    ``asyncio.wait_for``, which does not cancel the underlying thread.
+    """
+    try:
+        from google.generativeai.types import RequestOptions
+    except Exception:
+        return model.generate_content(contents)
+    return model.generate_content(
+        contents,
+        request_options=RequestOptions(timeout=GEMINI_CALL_TIMEOUT_SECONDS),
+    )
+
+
+async def _run_blocking(
+    func: Callable[..., T],
+    *args: Any,
+    thread_pool: ThreadPoolExecutor | None = None,
+    **kwargs: Any,
+) -> T:
     loop = asyncio.get_running_loop()
-    executor = _get_blocking_executor()
+    executor = thread_pool if thread_pool is not None else _get_pdf_cpu_executor()
     if kwargs:
         return await loop.run_in_executor(executor, functools.partial(func, *args, **kwargs))
     if not args:
@@ -190,14 +261,27 @@ async def _run_blocking(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     return await loop.run_in_executor(executor, func, *args)
 
 
-async def _run_blocking_timed(timeout_s: float, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+async def _run_blocking_timed(
+    timeout_s: float,
+    func: Callable[..., T],
+    *args: Any,
+    thread_pool: ThreadPoolExecutor | None = None,
+    **kwargs: Any,
+) -> T:
     """
-    Run blocking callable in the shared executor with an asyncio-level deadline.
-    The worker thread may still finish after a timeout; the caller stops waiting and gets HTTP 504.
+    Run blocking callable in a bounded thread pool with an asyncio-level deadline.
+
+    ``asyncio.wait_for`` alone does not stop the worker thread; combine with provider
+    deadlines (e.g. Gemini ``RequestOptions`` in ``_gemini_generate_content``) so slots
+    free promptly. For Gemini, pass ``thread_pool=_get_gemini_blocking_executor()`` to
+    isolate SDK threads from PDF CPU work when ``GEMINI_POOL_MAX_WORKERS`` is set.
     """
     label = getattr(func, "__name__", "blocking_call")
     try:
-        return await asyncio.wait_for(_run_blocking(func, *args, **kwargs), timeout=timeout_s)
+        return await asyncio.wait_for(
+            _run_blocking(func, *args, thread_pool=thread_pool, **kwargs),
+            timeout=timeout_s,
+        )
     except asyncio.TimeoutError as e:
         raise HTTPException(
             status_code=504,
@@ -232,7 +316,7 @@ redis: Optional[Redis] = None
 @app.on_event("startup")
 async def _startup() -> None:
     global redis
-    _get_blocking_executor()
+    _init_blocking_executors()
     redis = Redis.from_url(REDIS_URL, decode_responses=True)
     try:
         await redis.ping()
@@ -358,7 +442,7 @@ def _extract_markdown_with_gemini(
         f"{chr(10).join(pages_block)}"
     )
     try:
-        resp = model.generate_content(prompt)
+        resp = _gemini_generate_content(model, prompt)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini parser request failed: {e}") from e
 
@@ -414,7 +498,7 @@ def _extract_markdown_with_gemini_native_pdf(
         prompt,
     ]
     try:
-        resp = model.generate_content(contents)
+        resp = _gemini_generate_content(model, contents)
     except HTTPException:
         raise
     except Exception as e:
@@ -646,7 +730,7 @@ def _summarize_with_gemini(
     )
 
     try:
-        resp = model.generate_content(prompt)
+        resp = _gemini_generate_content(model, prompt)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini summarization request failed: {e}") from e
 
@@ -753,6 +837,7 @@ async def _process_pdf_bytes(
                     pdf_bytes,
                     filename=filename or "unknown.pdf",
                     page_texts=source_page_texts,
+                    thread_pool=_get_gemini_blocking_executor(),
                 )
             page_strings = _split_markdown_by_page_markers(md, len(source_page_texts))
             pages = [{"page": i + 1, "content": c} for i, c in enumerate(page_strings)]
@@ -770,6 +855,7 @@ async def _process_pdf_bytes(
                     pdf_bytes,
                     filename=filename or "unknown.pdf",
                     expected_pages=expected_pages,
+                    thread_pool=_get_gemini_blocking_executor(),
                 )
             page_strings = _split_markdown_by_page_markers(md, expected_pages)
             pages = [{"page": i + 1, "content": c} for i, c in enumerate(page_strings)]
@@ -853,6 +939,7 @@ async def _process_pdf_bytes(
                 extracted_text=text,
                 filename=filename or "unknown.pdf",
                 language=language,
+                thread_pool=_get_gemini_blocking_executor(),
             )
         summary_generated_at = now
         await redis_client.set(
@@ -1045,7 +1132,7 @@ def _gemini_answer_sync(payload: GeminiAnswerRequest) -> dict:
         full_prompt = f"User question:\n{payload.prompt}\n\nAnswer in {answer_lang}."
 
     try:
-        resp = model.generate_content(full_prompt)
+        resp = _gemini_generate_content(model, full_prompt)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini request failed: {e}") from e
 
@@ -1066,5 +1153,10 @@ def _gemini_answer_sync(payload: GeminiAnswerRequest) -> dict:
 @app.post("/api/gemini/answer")
 async def gemini_answer(payload: GeminiAnswerRequest) -> dict:
     async with _llm_slot():
-        return await _run_blocking_timed(GEMINI_CALL_TIMEOUT_SECONDS, _gemini_answer_sync, payload)
+        return await _run_blocking_timed(
+            GEMINI_CALL_TIMEOUT_SECONDS,
+            _gemini_answer_sync,
+            payload,
+            thread_pool=_get_gemini_blocking_executor(),
+        )
 

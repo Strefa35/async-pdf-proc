@@ -132,10 +132,11 @@ Defined in `docker-compose.yml` / backend:
 - `MISTRAL_OCR_RASTER_ZOOM` - PyMuPDF render scale for OCR raster (default: `1.75`)
 - `REDIS_URL` - default: `redis://redis:6379/0`
 - `CORS_ORIGINS` - default includes local frontend URLs
-- `GEMINI_CALL_TIMEOUT_SECONDS` - wall-clock cap for each blocking Gemini SDK call (default: `180`)
+- `GEMINI_CALL_TIMEOUT_SECONDS` - HTTP deadline passed to the Gemini SDK via `RequestOptions` when supported (default: `180`); the async handler also wraps blocking work with `asyncio.wait_for` for the same duration
 - `PDF_PARSE_TIMEOUT_SECONDS` - wall-clock cap for PyPDF extraction in the thread pool (default: `120`)
 - `MISTRAL_HTTP_TIMEOUT_SECONDS` - `httpx` read/write timeout for Mistral HTTP calls (default: `120`; connect uses `min(30, value)` seconds)
-- `BLOCKING_POOL_MAX_WORKERS` - thread pool size for PyPDF + Gemini blocking work (default: `8`)
+- `BLOCKING_POOL_MAX_WORKERS` - thread pool size for CPU-heavy PyPDF / PyMuPDF work (default: `8`)
+- `GEMINI_POOL_MAX_WORKERS` - optional: when set to a positive integer, synchronous Gemini SDK calls use a **dedicated** thread pool so PDF rasterization/parse work cannot exhaust threads used for `generate_content`; when unset, Gemini shares the PDF CPU pool
 - `SYNC_EXTRACT_MAX_CONCURRENT` - max PDFs processed in parallel within one `POST /api/pdf/extract` (default: `min(8, BLOCKING_POOL_MAX_WORKERS)`)
 - `LLM_MAX_INFLIGHT` - global cap on concurrent LLM operations per process (Gemini SDK calls, Mistral markdown HTTP, and `POST /api/gemini/answer`; default: `min(8, BLOCKING_POOL_MAX_WORKERS)`)
 - `LLM_SLOT_ACQUIRE_TIMEOUT_SECONDS` - seconds to wait for a free LLM slot when saturated (`0` ≈ fail fast → `503` + `Retry-After`; `inf` or `-1` = queue until available)
@@ -186,6 +187,8 @@ services:
 ## Testing
 
 Primary automated suite: **pytest** (`python3 tests/run_pytest.py` — JUnit XML and HTML report under `tests/report/`). This includes **Redis Streams** checks via Testcontainers (`-m streams`; needs Docker). HTTP integration tests expect a running stack. Details: **[`docs/TESTS.md`](docs/TESTS.md)**. Run commands from the project root.
+
+The CI helper script **`scripts/ci_build_and_test.sh`** waits for the Compose stack (optional **`docker compose --wait`**, then **`curl`** polls on backend and frontend proxy health) before downloading fixtures and running pytest; tunables are listed in **`docs/TESTS.md`**.
 
 For a manual demo checklist, see [`docs/TEST_CHECKLIST.md`](docs/TEST_CHECKLIST.md).
 

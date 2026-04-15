@@ -30,6 +30,7 @@ Options:
 | Runner | [`tests/run_pytest.py`](../tests/run_pytest.py) — creates `.pytest-venv/` (override with `PYTEST_VENV`), installs requirements, runs pytest |
 | Reports | `tests/report/junit.xml` (JUnit) and `tests/report/report.html` (self-contained HTML via `pytest-html`) |
 | Markers | See [`pytest.ini`](../pytest.ini). Highlights: `unit` (in-process ASGI; needs **Redis** reachable at `REDIS_URL`, default `redis://127.0.0.1:6379/0`), `streams` (Redis Streams + **Testcontainers**; needs **Docker**), `integration` (live HTTP), `smoke`, `fr1`…`fr7`, `multi` |
+| Worker retry (unit, PR-TR-7) | [`tests/test_worker_failure_classification.py`](../tests/test_worker_failure_classification.py) — `test_transient_retry_defers_xadd_until_after_backoff_task` checks that retry **`XADD`** runs only after the delayed backoff task (main consumer path not blocked). Mocks Redis and `_process_pdf_bytes`; patches **`app.worker._retry_backoff_sleep`** (avoids patching global `asyncio.sleep`). No Docker. |
 
 **Run the full suite** (stack must be up for `integration` tests; `unit` tests only need Redis):
 
@@ -94,7 +95,21 @@ Shared helpers: `tests/support/checks.py`, `tests/support/http_api.py`, `tests/s
 
 ## CI
 
-[`scripts/ci_build_and_test.sh`](../scripts/ci_build_and_test.sh) brings Compose up, runs `python3 tests/download_pdf_fixtures.py --force --strict`, then `python3 tests/run_pytest.py`. GitHub Actions uploads `tests/report/` as the **pytest-reports** artifact.
+[`scripts/ci_build_and_test.sh`](../scripts/ci_build_and_test.sh) builds and starts the Compose stack, waits until services are ready, runs `python3 tests/download_pdf_fixtures.py --force --strict`, then `python3 tests/run_pytest.py`. GitHub Actions uploads `tests/report/` as the **pytest-reports** artifact.
+
+**Stack readiness**
+
+- If `docker compose up` supports **`--wait`**, the script uses **`up -d --build --wait --wait-timeout 120`** so Compose blocks until healthchecks pass (when defined).
+- Regardless of `--wait`, the script then polls with **`curl`** until:
+  - `http://127.0.0.1:8000/api/health` (backend), and  
+  - `http://127.0.0.1:5173/api/health` (frontend Vite proxy to backend health)  
+  return HTTP 200. **`curl`** must be on `PATH`.
+- Tune polling (optional):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CI_STACK_READY_TIMEOUT_SECONDS` | `120` | Max seconds to wait for each readiness URL |
+| `CI_STACK_READY_POLL_INTERVAL_SECONDS` | `2` | Sleep between polls |
 
 ## Troubleshooting
 

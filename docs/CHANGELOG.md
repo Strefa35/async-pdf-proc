@@ -9,7 +9,7 @@ Versions follow **v.0.0.x** labels used in the UI (`frontend/src/appMeta.ts`) an
 
 ## v.0.0.2 — 14 April 2026
 
-Hardening and product-clarity release. Closes the gaps listed under “Top Rejection Reasons” in `docs/TODO.md` (evaluation of the earlier delivery) and aligns implementation with `docs/IMPLEMENTATION_STATUS.md` (Sections 1–2 and §9).
+Hardening and product-clarity release. Closes the gaps listed under “Top Rejection Reasons” in `docs/TODO.md` (evaluation of the earlier delivery) and aligns implementation with `docs/IMPLEMENTATION_STATUS.md` (Sections 1–2 and Section 9).
 
 ### Parsing and product clarity
 
@@ -21,16 +21,19 @@ Hardening and product-clarity release. Closes the gaps listed under “Top Rejec
 
 ### Concurrency, backpressure, and resilience (API + worker)
 
-- Blocking PDF/LLM work off the asyncio event loop via bounded `ThreadPoolExecutor` (`BLOCKING_POOL_MAX_WORKERS`, `_run_blocking` / `_run_blocking_timed`).
+- Blocking PyPDF / PyMuPDF CPU work off the asyncio event loop via a bounded PDF CPU pool **`_get_pdf_cpu_executor()`** (`BLOCKING_POOL_MAX_WORKERS`, `_run_blocking` / `_run_blocking_timed`); blocking Gemini SDK calls use **`_get_gemini_blocking_executor()`** — a **dedicated** pool when **`GEMINI_POOL_MAX_WORKERS`** is a positive integer, otherwise Gemini shares the PDF CPU pool. **`_init_blocking_executors()`** eagerly creates the pool(s) at FastAPI startup and in the worker **`main()`**.
 - LLM capacity: `LLM_MAX_INFLIGHT`, `LLM_SLOT_ACQUIRE_TIMEOUT_SECONDS`; **503** + `Retry-After` when saturated; per-file errors on multi-file sync under pressure.
 - Multi-file synchronous extract: bounded parallelism (`SYNC_EXTRACT_MAX_CONCURRENT`, `asyncio.gather`).
-- Timeouts: Gemini, PyPDF parse, Mistral HTTP (see `.env.example`).
-- Worker uses the same processing and LLM slot behavior as the API.
+- Timeouts: PyPDF parse, Mistral HTTP; **`_gemini_generate_content`** passes **`GEMINI_CALL_TIMEOUT_SECONDS`** into the Gemini SDK via **`RequestOptions`** when available (stuck HTTP can fail inside the worker thread), plus asyncio **`wait_for`** on the async side (see `.env.example`).
+- Worker uses the same processing and LLM slot behavior as the API; best-effort **`XACK`** after terminal outcomes tolerates the same **transient** transport exceptions as the Redis retry path (**`_safe_xack`** aligns with the retry classifier, not only `RedisConnectionError`).
 
 ### Redis Streams queue hardening
 
 - Stream semantics documented: `docs/STREAMS_CONTRACT.md`.
 - Retries with backoff/jitter; `attempt` / `process_attempt` / `correlation_id` on jobs and stream fields.
+- **Transient retry backoff** does not block the main consumer loop: with attempts remaining, the worker schedules **`asyncio.create_task`** for **`sleep` → `XADD` → `XACK`** (same ordering as before for crash safety) so other stream deliveries keep draining during backoff.
+- **`_retry_backoff_sleep`** wraps **`asyncio.sleep`** for the delayed path so unit tests can patch backoff without affecting global **`asyncio.sleep`**; in-flight retry tasks are retained in a module-level set until completion so they are not garbage-collected before **`XADD` / `XACK`**.
+- Unit coverage: `tests/test_worker_failure_classification.py::test_transient_retry_defers_xadd_until_after_backoff_task`.
 - Pending reclaim (`XAUTOCLAIM`, `JOB_STREAM_CLAIM_IDLE_MS`); DLQ after max reclaims (`JOB_MAX_RECLAIMS_PER_MESSAGE`).
 - Dead-letter stream `REDIS_STREAM_DLQ`; replay policy in the streams contract.
 - Structured JSON logs (`backend/app/worker_observability.py`).
@@ -44,11 +47,12 @@ Hardening and product-clarity release. Closes the gaps listed under “Top Rejec
 - Redis Streams tests with Testcontainers (`tests/test_redis_streams_integration.py`, `@pytest.mark.streams`); see `docs/TESTS.md`.
 - FR-ordered runner: `python3 tests/run_fr_tests.py`.
 - PDF fixtures under `tests/fixtures/pdf/`; `tests/download_pdf_fixtures.py`.
-- CI helper: `scripts/ci_build_and_test.sh` (Compose build, strict fixture download, pytest).
+- CI helper: `scripts/ci_build_and_test.sh` — Compose build, optional Compose **`--wait`** when supported, **`curl`**-based readiness for backend and frontend proxy health (tunables **`CI_STACK_READY_TIMEOUT_SECONDS`**, **`CI_STACK_READY_POLL_INTERVAL_SECONDS`** in **`docs/TESTS.md`**), strict fixture download, pytest.
+- **`tests/test_pr_fr_gemini_paths.py`**: asserts **`RequestOptions`** / SDK timeout on **`_gemini_generate_content`**; asserts **`_get_gemini_blocking_executor()`** shares the PDF CPU pool when **`GEMINI_POOL_MAX_WORKERS`** is unset and uses a **separate** pool when it is set.
 
 ### Documentation
 
-- Post-review tables §9.1–§9.2 in `docs/IMPLEMENTATION_STATUS.md` track closure of PR-FR-* / PR-TR-* items for this release.
+- Post-review tables Section 9.1–9.2 in `docs/IMPLEMENTATION_STATUS.md` track closure of PR-FR-* / PR-TR-* items for this release.
 
 ---
 
@@ -78,7 +82,7 @@ First integrated delivery (**baseline**, before the v.0.0.2 hardening pass). Sum
 | Topic | Document |
 |--------|----------|
 | Task spec and v.0.0.1 evaluation | `docs/TODO.md` |
-| Requirement matrix and §9 backlog | `docs/IMPLEMENTATION_STATUS.md` |
+| Requirement matrix and Section 9 backlog | `docs/IMPLEMENTATION_STATUS.md` |
 | Streams semantics | `docs/STREAMS_CONTRACT.md` |
 | How to run tests | `docs/TESTS.md` |
 | Operator / developer guide | `README.md` |

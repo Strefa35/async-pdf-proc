@@ -21,7 +21,7 @@ The worker **`XACK`s** the primary stream message ID only after one of the follo
 1. **Success** — Job updated to `done`, PDF blob key removed, message **`XACK`ed**.
 2. **Terminal failure (no further retry)** — Job updated to `failed` (or moved to DLQ first, see below), message **`XACK`ed**.
 3. **Malformed message** — Missing `job_id` (cannot correlate work): message **`XACK`ed** (optionally mirrored to DLQ with diagnostics).
-4. **Retry re-enqueue** — For a **transient** failure with attempts remaining: a **new** message is **`XADD`ed** to `doc_jobs` with an incremented `attempt` field, then the **current** message is **`XACK`ed** (ordering: `XADD` then `XACK` so a crash after `XADD` may duplicate work but idempotency covers it).
+4. **Retry re-enqueue** — For a **transient** failure with attempts remaining: after **exponential backoff + jitter**, a **new** message is **`XADD`ed** to `doc_jobs` with an incremented `attempt` field, then the **current** message is **`XACK`ed** (ordering: `XADD` then `XACK` so a crash after `XADD` may duplicate work but idempotency covers it). The backoff and subsequent **`XADD` / `XACK`** run in a **background asyncio task** so the main **`XREADGROUP`** loop can process other deliveries during the wait; the stream message stays **pending** until that task completes **`XADD`** then **`XACK`** (same durability as an inline sleep before re-enqueue).
 5. **Dead-letter** — After max process attempts or max reclaim attempts: payload and error metadata are **`XADD`ed** to the DLQ stream (default `doc_jobs_dlq`), job marked `failed`, primary message **`XACK`ed**.
 
 The worker does **not** `XACK` while a message should remain pending for automatic reclaim (see visibility timeout). Normal processing either completes the outcomes above or, on shutdown mid-flight, leaves the message pending for **`XAUTOCLAIM`**.
@@ -29,7 +29,7 @@ The worker does **not** `XACK` while a message should remain pending for automat
 ## Retries (PR-TR-7)
 
 - Transient classes include: Redis connection errors, HTTP `502`/`503`/`504`/`429` from providers, LLM capacity saturation (`LlmCapacityExceededError`), and asyncio timeouts around blocking work.
-- Bounded **`attempt`** (integer) is carried on stream fields and mirrored into the job record. Backoff is applied before `XADD` retry.
+- Bounded **`attempt`** (integer) is carried on stream fields and mirrored into the job record. Backoff (`JOB_RETRY_BASE_DELAY_SECONDS`, exponential cap + jitter) is applied in the delayed re-enqueue path **before** the retry `XADD` (see **When `XACK` is allowed**, item 4 above).
 - Non-transient errors (e.g. HTTP `400`, missing PDF blob, configuration errors) do not increment retry; they fail the job immediately.
 
 ## Pending reclaim (PR-TR-8)
