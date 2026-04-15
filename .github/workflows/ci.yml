@@ -32,3 +32,10 @@ jobs:
 
       - name: Build stack and run all tests
         run: ./scripts/ci_build_and_test.sh
+
+      - name: Upload pytest reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-reports
+          path: tests/report/

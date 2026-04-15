@@ -20,8 +20,25 @@ The system must prioritize backend implementation and asynchronous processing.
 - The user must be able to choose a parser method.
 - Supported parser methods:
   - `pypdf` (text extraction),
-  - `gemini-2.5-flash` (advanced parsing to markdown),
-  - `mistral` (nice-to-have, lowest priority).
+  - `gemini-2.5-flash-pdf` (Gemini multimodal input: PDF bytes → markdown per page),
+  - `gemini-2.5-flash-text` (formatter: PyPDF page text → Gemini markdown),
+  - `gemini-2.5-flash` (**legacy identifier**, same pipeline as `gemini-2.5-flash-text`; retained for backward compatibility),
+  - `mistral` (nice-to-have, lowest priority: PyPDF text → Mistral chat markdown),
+  - `mistral-ocr` (optional OCR-style path: rasterize pages with PyMuPDF → Mistral vision chat per page → markdown).
+
+#### Gemini parsing modes (product clarity)
+- **Native PDF (`gemini-2.5-flash-pdf`):** the model receives `application/pdf` inline data as the primary document signal. Page boundaries for splitting use PyPDF **page count only** (not page text as model input).
+- **Text formatter (`gemini-2.5-flash-text` and legacy `gemini-2.5-flash`):** PyPDF extracts per-page text, then Gemini formats it to markdown. This path does **not** perform separate OCR; scanned or image-only pages often yield empty PyPDF text (see scanned-PDF note below).
+
+#### Mistral OCR pipeline (`mistral-ocr`)
+- Pages are rendered to PNG bitmaps (PyMuPDF) and sent to the Mistral Chat Completions API as `image_url` parts (base64 data URLs), **one HTTP request per page** (same endpoint as `mistral`, different message shape).
+- Vision model id comes from `MISTRAL_OCR_MODEL`. Page count is limited by `MISTRAL_OCR_MAX_PAGES` (HTTP **400** if the PDF exceeds the cap).
+- This is **not** Mistral Document AI / batch OCR; it is an in-process raster + vision transcription path suitable for scan-heavy PDFs within cost and latency constraints.
+
+#### Scanned / image-heavy PDFs
+- **`pypdf`, `gemini-2.5-flash-text`, `mistral`, legacy `gemini-2.5-flash`:** rely on PyPDF (or equivalent text-in) for page content. Pages with no extractable text produce empty strings; downstream markdown may be empty or unhelpful. There is **no PyPDF-text OCR** for those parsers.
+- **`gemini-2.5-flash-pdf`:** the model can often read rasterized page content from the PDF bytes, subject to provider limits, policy, and document size (`GEMINI_INLINE_PDF_MAX_BYTES`). Oversized files receive HTTP `413` with a clear message (no silent fallback to the text formatter).
+- **`mistral-ocr`:** uses rendered page images, so scanned pages are visible to the vision model subject to Mistral limits and `MISTRAL_OCR_MAX_PAGES`.
 
 ### FR-3: Asynchronous Processing
 - Processing must be asynchronous (not blocking the upload request).
@@ -71,6 +88,7 @@ The system must prioritize backend implementation and asynchronous processing.
 
 ### TR-5: Containerization
 - All application components must run in Docker Compose.
+- Implemented stack: backend API, async **worker**, Redis, frontend, and local **mistral-mock** (Mistral-compatible HTTP for local parser tests).
 
 ---
 
@@ -79,7 +97,7 @@ The system must prioritize backend implementation and asynchronous processing.
 The API should support:
 1. Upload endpoint:
    - accepts one or more PDFs,
-   - accepts parser selection (`pypdf`, `gemini-2.5-flash`, `mistral`),
+   - accepts parser selection (`pypdf`, `gemini-2.5-flash-pdf`, `gemini-2.5-flash-text`, `gemini-2.5-flash`, `mistral`, `mistral-ocr`),
    - returns job identifier(s) and initial status.
 2. Status/result endpoint(s):
    - returns job status (`queued`, `processing`, `done`, `failed`),
@@ -134,7 +152,7 @@ The requirements are considered met when:
 
 This section defines the minimum test scope to validate the implementation.
 
-**Automated scripts** (`tests/run_smoke_tests.sh`, `tests/run_all_fr_tests.sh`, `tests/test_integration_all_fr.sh`) and how to run them are documented in **`docs/TESTS.md`**.
+**Automated tests** (pytest + `tests/run_pytest.py`, `tests/run_fr_tests.py`, `tests/download_pdf_fixtures.py`) and how to run them are documented in **`docs/TESTS.md`**.
 
 ### 9.1 Preconditions
 
@@ -279,4 +297,4 @@ curl -s -X POST http://localhost:5173/api/pdf/extract \
 
 ---
 
-**Async PDF Processor** v.0.0.1 · 26 March 2026 · Code author: Arkadiusz Czerwinski
+**Async PDF Processor** v.0.0.2 · 14 April 2026 · Code author: Arkadiusz Czerwinski

@@ -1,0 +1,6 @@
+httpx>=0.27,<1
+pytest>=8,<9
+pytest-html>=4,<5
+testcontainers[redis]>=4.4,<5
+# For in-process ASGI tests (`-m unit`) that import `app.main`:
+-r ../backend/requirements.txt

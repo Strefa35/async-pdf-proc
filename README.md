@@ -35,8 +35,9 @@ The app runs as several services with Docker Compose:
    - PDF parsing via `pypdf`
    - Gemini calls via `google-generativeai`
    - Redis integration for cache
-2. `worker` (container `pdf-proc-worker`)
-   - consumes Redis Streams (`doc_jobs`) and completes async extraction jobs
+2. `worker` (Compose service; scale with `docker compose up --scale worker=N`)
+   - consumes Redis Streams (`doc_jobs`) with at-least-once semantics; see [`docs/STREAMS_CONTRACT.md`](docs/STREAMS_CONTRACT.md)
+   - exposes Prometheus metrics on port **9464** (`/metrics`) when `WORKER_METRICS_PORT` is non-zero
 3. `frontend` (container `pdf-proc-frontend`)
    - React + TypeScript (Vite dev server)
    - calls backend through `/api` proxy
@@ -58,10 +59,12 @@ The app runs as several services with Docker Compose:
 ## Project structure
 
 ```text
-async-pdf-processor/
+async-pdf-proc/
 ├── backend/
 │   ├── app/
-│   │   └── main.py
+│   │   ├── main.py
+│   │   ├── worker.py
+│   │   └── worker_observability.py
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── frontend/
@@ -74,9 +77,13 @@ async-pdf-processor/
 │   ├── tsconfig.json
 │   └── vite.config.ts
 ├── tests/
-│   ├── fixtures/
-│   │   └── pdf/          # copy sample PDFs here; tests discover all *.pdf in this folder
-│   └── ...
+│   ├── fixtures/pdf/     # sample PDFs; pytest discovers *.pdf (see docs/TESTS.md)
+│   ├── run_pytest.py     # CI + local: venv, pytest, HTML/JUnit reports
+│   ├── run_fr_tests.py   # optional ordered FR runs (-m fr1 … -m multi)
+│   ├── download_pdf_fixtures.py
+│   ├── test_*.py
+│   └── support/          # httpx helpers + JSON checks
+├── pytest.ini
 ├── docker-compose.yml
 ├── .env.example
 └── README.md
@@ -120,15 +127,26 @@ Defined in `docker-compose.yml` / backend:
 - `GEMINI_MODEL` - default: `gemini-2.5-flash`
 - `MISTRAL_MODEL` - default: `mistral-small-latest`
 - `MISTRAL_API_BASE_URL` - default: `http://mistral-mock:8001` (local mock)
+- `MISTRAL_OCR_MODEL` - vision model for `parser=mistral-ocr` (default: `mistral-small-latest`)
+- `MISTRAL_OCR_MAX_PAGES` - max pages processed for `mistral-ocr` (default: `25`)
+- `MISTRAL_OCR_RASTER_ZOOM` - PyMuPDF render scale for OCR raster (default: `1.75`)
 - `REDIS_URL` - default: `redis://redis:6379/0`
 - `CORS_ORIGINS` - default includes local frontend URLs
+- `GEMINI_CALL_TIMEOUT_SECONDS` - wall-clock cap for each blocking Gemini SDK call (default: `180`)
+- `PDF_PARSE_TIMEOUT_SECONDS` - wall-clock cap for PyPDF extraction in the thread pool (default: `120`)
+- `MISTRAL_HTTP_TIMEOUT_SECONDS` - `httpx` read/write timeout for Mistral HTTP calls (default: `120`; connect uses `min(30, value)` seconds)
+- `BLOCKING_POOL_MAX_WORKERS` - thread pool size for PyPDF + Gemini blocking work (default: `8`)
+- `SYNC_EXTRACT_MAX_CONCURRENT` - max PDFs processed in parallel within one `POST /api/pdf/extract` (default: `min(8, BLOCKING_POOL_MAX_WORKERS)`)
+- `LLM_MAX_INFLIGHT` - global cap on concurrent LLM operations per process (Gemini SDK calls, Mistral markdown HTTP, and `POST /api/gemini/answer`; default: `min(8, BLOCKING_POOL_MAX_WORKERS)`)
+- `LLM_SLOT_ACQUIRE_TIMEOUT_SECONDS` - seconds to wait for a free LLM slot when saturated (`0` ≈ fail fast → `503` + `Retry-After`; `inf` or `-1` = queue until available)
+- **Worker / Streams** — `REDIS_STREAM_DLQ`, `JOB_MAX_PROCESS_ATTEMPTS`, `JOB_MAX_RECLAIMS_PER_MESSAGE`, `JOB_STREAM_CLAIM_IDLE_MS`, `WORKER_XREADGROUP_COUNT`, `WORKER_XREADGROUP_BLOCK_MS`, `WORKER_METRICS_PORT`, `JOB_RETRY_BASE_DELAY_SECONDS`; optional OpenTelemetry: `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_SDK_DISABLED`. See [`docs/STREAMS_CONTRACT.md`](docs/STREAMS_CONTRACT.md).
 
 ## Run the project
 
 From project root:
 
 ```bash
-cd async-pdf-processor
+# From the repository root (directory containing docker-compose.yml)
 docker-compose up --build
 ```
 
@@ -138,10 +156,20 @@ If your environment supports the plugin syntax, this is equivalent:
 docker compose up --build
 ```
 
+To scrape metrics from the host with a **single** worker, add a `docker-compose.override.yml` (not committed) such as:
+
+```yaml
+services:
+  worker:
+    ports:
+      - "9464:9464"
+```
+
 ### Service URLs
 
 - Frontend: [http://localhost:5173](http://localhost:5173)
 - Backend health: [http://localhost:8000/api/health](http://localhost:8000/api/health)
+- Worker Prometheus scrape: `http://worker:9464/metrics` from another Compose service, or publish the port in a local override (see below). The default Compose file **exposes** `9464` only so `docker compose up --scale worker=N` does not collide on the host.
 - Redis: `localhost:6379`
 
 ## How to use
@@ -157,7 +185,7 @@ docker compose up --build
 
 ## Testing
 
-Automated tests (`run_smoke_tests.sh`, `run_all_fr_tests.sh` including per-FR scripts and the all-fixtures multi-PDF check, `test_integration_all_fr.sh`), environment variables, and troubleshooting are documented in **[`docs/TESTS.md`](docs/TESTS.md)**. Run commands from the project root.
+Primary automated suite: **pytest** (`python3 tests/run_pytest.py` — JUnit XML and HTML report under `tests/report/`). This includes **Redis Streams** checks via Testcontainers (`-m streams`; needs Docker). HTTP integration tests expect a running stack. Details: **[`docs/TESTS.md`](docs/TESTS.md)**. Run commands from the project root.
 
 For a manual demo checklist, see [`docs/TEST_CHECKLIST.md`](docs/TEST_CHECKLIST.md).
 
@@ -182,7 +210,7 @@ Extracts parsed content from uploaded PDF files and caches each file in Redis.
 Request:
 - `multipart/form-data`
 - field: `files` (one or more PDF files)
-- field: `parser` (`pypdf` | `gemini-2.5-flash` | `mistral`)
+- field: `parser` (`pypdf` | `gemini-2.5-flash-pdf` | `gemini-2.5-flash-text` | `gemini-2.5-flash` | `mistral` | `mistral-ocr`)
 - field: `language` (optional, default: `en`) - language for Gemini summary output
 
 Response:
@@ -207,10 +235,17 @@ Response:
 
 Notes:
 - `pypdf` returns plain extracted text (per page in `pages[]`).
-- `gemini-2.5-flash` returns markdown-oriented output generated by Gemini (per page in `pages[]`).
-- `mistral` returns markdown-oriented output generated by Mistral (per page in `pages[]`).
+- `gemini-2.5-flash-pdf` sends the **PDF bytes** to Gemini as inline `application/pdf` and returns markdown-oriented output (per page in `pages[]`). Oversized inputs fail with **413** and an explicit message; tune `GEMINI_INLINE_PDF_MAX_BYTES` (default 20 MiB) when appropriate.
+- `gemini-2.5-flash-text` runs the **text formatter** path: PyPDF page text → Gemini markdown (per page in `pages[]`).
+- `gemini-2.5-flash` is a **legacy alias** for the same formatter pipeline as `gemini-2.5-flash-text` (kept for existing clients).
+- `mistral` returns markdown-oriented output generated by Mistral from **PyPDF page text** (per page in `pages[]`).
+- `mistral-ocr` **rasterizes** each PDF page to PNG (PyMuPDF), then calls a **Mistral vision** model (`MISTRAL_OCR_MODEL`, default `mistral-small-latest`) once per page with `image_url` data URLs. Suited to scan-heavy PDFs; capped by `MISTRAL_OCR_MAX_PAGES` (default 25). Raster zoom: `MISTRAL_OCR_RASTER_ZOOM` (default `1.75`).
 - `summary` is generated using Gemini 2.5 Flash and returned once per uploaded file.
 - By default, local Docker uses `mistral-mock` service, so no external Mistral account is required for parser testing.
+
+**Client migration (Gemini parser ids):** prefer `gemini-2.5-flash-text` instead of `gemini-2.5-flash` when you intend the PyPDF→Gemini formatter. Use `gemini-2.5-flash-pdf` when the model should read the PDF as binary. Cache keys are `pdf:{parser}:{sha256}`, so switching parser ids may recompute once per file.
+
+**Scanned PDFs:** text-based parsers (`pypdf`, `gemini-2.5-flash-text`, `mistral`, legacy `gemini-2.5-flash`) only see what PyPDF extracts; image-only pages are often empty. Use **`mistral-ocr`**, **`gemini-2.5-flash-pdf`**, or an external OCR service for raster-first workflows (see `docs/REQUIREMENTS.md`).
 
 ### Use real Mistral API instead of local mock
 
@@ -306,4 +341,4 @@ docker-compose up -d --build --force-recreate frontend
 
 ---
 
-**Async PDF Processor** v.0.0.1 · 26 March 2026 · Code author: Arkadiusz Czerwinski
+**Async PDF Processor** v.0.0.2 · 14 April 2026 · Code author: Arkadiusz Czerwinski

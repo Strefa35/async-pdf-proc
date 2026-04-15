@@ -3,7 +3,13 @@ import { APP_META } from "./appMeta";
 import { LANGUAGE_OPTIONS, UI_STRINGS } from "./locales";
 import { LanguageCode } from "./locales/types";
 
-type ParserType = "pypdf" | "gemini-2.5-flash" | "mistral";
+type ParserType =
+  | "pypdf"
+  | "gemini-2.5-flash-pdf"
+  | "gemini-2.5-flash-text"
+  | "gemini-2.5-flash"
+  | "mistral"
+  | "mistral-ocr";
 
 type ExtractItem = {
   filename: string;
@@ -133,8 +139,11 @@ export default function App() {
             {ui.parserLabel}
             <select value={parser} onChange={(e) => setParser(e.target.value as ParserType)}>
               <option value="pypdf">{ui.parserPypdfOption}</option>
-              <option value="gemini-2.5-flash">{ui.parserGeminiOption}</option>
+              <option value="gemini-2.5-flash-pdf">{ui.parserGeminiPdfOption}</option>
+              <option value="gemini-2.5-flash-text">{ui.parserGeminiTextOption}</option>
+              <option value="gemini-2.5-flash">{ui.parserGeminiLegacyOption}</option>
               <option value="mistral">{ui.parserMistralOption}</option>
+              <option value="mistral-ocr">{ui.parserMistralOcrOption}</option>
             </select>
           </label>
         </div>

@@ -6,8 +6,11 @@ export type UIStrings = {
   extractButton: string;
   parserLabel: string;
   parserPypdfOption: string;
-  parserGeminiOption: string;
+  parserGeminiPdfOption: string;
+  parserGeminiTextOption: string;
+  parserGeminiLegacyOption: string;
   parserMistralOption: string;
+  parserMistralOcrOption: string;
   extractMultiHint: string;
   selectedFilesLabel: string;
   extractStatusIdle: string;

@@ -3,8 +3,8 @@
  */
 export const APP_META = {
   name: "Async PDF Processor",
-  version: "v.0.0.1",
+  version: "v.0.0.2",
   /** Display date shown in the UI footer (fixed string). */
-  releaseDate: "26 March 2026",
+  releaseDate: "14 April 2026",
   codeAuthor: "Arkadiusz Czerwinski",
 } as const;
