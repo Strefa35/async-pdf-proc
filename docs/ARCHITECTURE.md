@@ -17,7 +17,7 @@ flowchart LR
   subgraph DockerCompose["Docker Compose stack"]
     FE[Frontend\nVite + React]
     API[Backend\nFastAPI]
-    W[Worker\npdf-proc-worker]
+    W[Worker\nasync-pdf-proc-worker-*]
     R[(Redis 7+\nStreams + cache)]
     MM[Mistral mock\noptional local LLM]
   end
@@ -43,13 +43,13 @@ flowchart LR
 
 ## 2. Containers and ports
 
-| Service | Role | Default host port |
-|--------|------|-------------------|
-| `frontend` | React UI; dev server proxies `/api` to backend | `5173` |
-| `backend` | FastAPI: health, sync extract, async job API, Gemini Q&A | `8000` |
-| `worker` | Async consumer: `XREADGROUP` on job stream, metrics on `9464` (expose) | metrics only |
-| `redis` | Job stream, consumer group, job state JSON, PDF blob staging, content cache | `6379` |
-| `mistral-mock` | Local HTTP server mimicking Mistral chat for tests / no-key demos | `8001` |
+| Service | Docker container name | Role | Default host port |
+|--------|----------------------|------|-------------------|
+| `frontend` | `async-pdf-proc-frontend` | React UI; dev server proxies `/api` to backend | `5173` |
+| `backend` | `async-pdf-proc-backend` | FastAPI: health, sync extract, async job API, Gemini Q&A | `8000` |
+| `worker` | `async-pdf-proc-worker-<n>` | Async consumer: `XREADGROUP` on job stream, metrics on `9464` (expose) | metrics only |
+| `redis` | `async-pdf-proc-redis` | Job stream, consumer group, job state JSON, PDF blob staging, content cache | `6379` |
+| `mistral-mock` | `async-pdf-proc-mistral-mock` | Local HTTP server mimicking Mistral chat for tests / no-key demos | `8001` |
 
 ```mermaid
 flowchart TB

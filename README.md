@@ -27,22 +27,22 @@ Stack highlights:
 
 The app runs as several services with Docker Compose:
 
-0. `mistral-mock`
+0. `mistral-mock` (container `async-pdf-proc-mistral-mock`)
    - local mock API for Mistral-compatible chat completions
    - used by default for local development/testing (no external Mistral account required)
-1. `backend` (container `pdf-proc-backend`)
+1. `backend` (container `async-pdf-proc-backend`)
    - FastAPI app
    - PDF parsing via `pypdf`
    - Gemini calls via `google-generativeai`
    - Redis integration for cache
-2. `worker` (Compose service; scale with `docker compose up --scale worker=N`)
+2. `worker` (containers `async-pdf-proc-worker-1`, …; Compose service; scale with `docker compose up --scale worker=N`)
    - consumes Redis Streams (`doc_jobs`) with at-least-once semantics; see [`docs/STREAMS_CONTRACT.md`](docs/STREAMS_CONTRACT.md)
    - exposes Prometheus metrics on port **9464** (`/metrics`) when `WORKER_METRICS_PORT` is non-zero
-3. `frontend` (container `pdf-proc-frontend`)
+3. `frontend` (container `async-pdf-proc-frontend`)
    - React + TypeScript (Vite dev server)
    - calls backend through `/api` proxy
    - interface language switcher
-4. `redis`
+4. `redis` (container `async-pdf-proc-redis`)
    - Redis 7.x
    - cache and Streams queue for async jobs
 

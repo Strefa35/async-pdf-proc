@@ -52,7 +52,7 @@ _logger.propagate = False
 
 def log_json(event: str, **fields: Any) -> None:
     """Emit one JSON object per line."""
-    payload: dict[str, Any] = {"ts": time.time(), "level": "INFO", "service": "pdf-proc-worker", "event": event}
+    payload: dict[str, Any] = {"ts": time.time(), "level": "INFO", "service": "async-pdf-proc-worker", "event": event}
     for k, v in fields.items():
         if v is not None:
             payload[k] = v
@@ -126,7 +126,7 @@ def _ensure_tracer() -> Any:
         _tracer = False
         return None
 
-    service = os.getenv("OTEL_SERVICE_NAME", "pdf-proc-worker")
+    service = os.getenv("OTEL_SERVICE_NAME", "async-pdf-proc-worker")
     resource = Resource.create({"service.name": service})
     provider = SDKTracerProvider(resource=resource)
     provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
@@ -134,7 +134,7 @@ def _ensure_tracer() -> Any:
     existing = trace_api.get_tracer_provider()
     if not isinstance(existing, SDKTracerProvider):
         trace_api.set_tracer_provider(provider)
-    _tracer = trace_api.get_tracer("pdf-proc-worker", "1.0.0")
+    _tracer = trace_api.get_tracer("async-pdf-proc-worker", "1.0.0")
     log_json("otel_tracer_initialized", service=service)
     return _tracer
 

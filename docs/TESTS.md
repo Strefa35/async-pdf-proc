@@ -11,6 +11,8 @@ This document describes how to run the **Python (pytest + httpx)** integration s
 | `GOOGLE_API_KEY` | Required for summaries (FR-5) and parts of the extraction tests; without it, tests that assert `summary` may fail. |
 | `MISTRAL_API_KEY` | Optional; Mistral tests also accept a clear “missing key” response (same idea as in FR-2 / smoke). |
 
+**Docker container names (local Compose):** `docker-compose.yml` sets Compose project name `async-pdf-proc` and explicit `container_name` values `async-pdf-proc-backend`, `async-pdf-proc-frontend`, `async-pdf-proc-redis`, and `async-pdf-proc-mistral-mock`. The `worker` service has no fixed `container_name`, so instances appear as `async-pdf-proc-worker-1`, `async-pdf-proc-worker-2`, … when scaled. Service DNS names inside the stack remain `backend`, `frontend`, `redis`, `worker`, and `mistral-mock`.
+
 **Download fixtures** (small PrinceXML sample PDFs):
 
 ```bash

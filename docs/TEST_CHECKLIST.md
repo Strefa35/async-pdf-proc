@@ -12,7 +12,7 @@ Environment: `local / staging / other: __________`
 
 ## 1) Preconditions
 
-- [ ] Docker Compose stack is running (`pdf-proc-backend`, `pdf-proc-frontend`, `worker` service, `redis`, and `mistral-mock` as configured)
+- [ ] Docker Compose stack is running (`async-pdf-proc-backend`, `async-pdf-proc-frontend`, `async-pdf-proc-redis`, `async-pdf-proc-mistral-mock`, workers `async-pdf-proc-worker-<n>` per `docker-compose.yml`)
 - [ ] `GOOGLE_API_KEY` is configured
 - [ ] At least one sample PDF is under `tests/fixtures/pdf/` (copy your own files; example path for commands below: `tests/fixtures/pdf/drylab.pdf`)
 

@@ -53,6 +53,7 @@ Hardening and product-clarity release. Closes the gaps listed under “Top Rejec
 ### Documentation
 
 - Post-review tables Section 9.1–9.2 in `docs/IMPLEMENTATION_STATUS.md` track closure of PR-FR-* / PR-TR-* items for this release.
+- **Docker Compose:** standardized container names on the `async-pdf-proc-*` prefix (`docker-compose.yml`: project `name`, explicit `container_name` for backend/frontend/redis/mistral-mock; workers `async-pdf-proc-worker-<n>`). `README.md`, `docs/ARCHITECTURE.md`, `docs/TEST_CHECKLIST.md`, `docs/TESTS.md`, `docs/STREAMS_CONTRACT.md`, and `docs/IMPLEMENTATION_STATUS.md` updated; default worker log / OTEL service id `async-pdf-proc-worker` in `backend/app/worker_observability.py` and `.env.example`.
 
 ---
 

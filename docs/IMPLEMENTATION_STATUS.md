@@ -77,7 +77,7 @@ From `docs/REQUIREMENTS.md` priority list:
 - Async processing via Redis Streams:
   - `POST /api/jobs/extract` creates jobs
   - `GET /api/jobs/{job_id}` returns status/result
-  - `pdf-proc-worker` consumes `doc_jobs`; transient retries **`XADD` / `XACK`** after backoff run in a **background task** so the **`XREADGROUP`** loop keeps draining other messages (see `docs/STREAMS_CONTRACT.md`).
+  - `async-pdf-proc-worker-*` consumes `doc_jobs`; transient retries **`XADD` / `XACK`** after backoff run in a **background task** so the **`XREADGROUP`** loop keeps draining other messages (see `docs/STREAMS_CONTRACT.md`).
 - **TR-3 stack:** PyPDF extraction + Gemini 2.5 Flash for advanced markdown conversion and per-file summarization (same code path for sync and worker).
 
 ---
@@ -154,7 +154,7 @@ When you complete work, update the **Status** cell and optionally add a short po
 | PR-TR-13 | **pytest** suite for core flows: health, single-file sync extract, async job lifecycle, `POST /api/gemini/answer` (fixtures for PDF bytes). | DONE | `tests/test_*.py`, `httpx` against live stack; `python3 tests/run_pytest.py`; reports under `tests/report/`. |
 | PR-TR-14 | **Redis Streams integration tests** (Testcontainers Redis, or CI-only Compose profile) covering consumer group, happy path, and at least one failure path. | DONE | `tests/test_redis_streams_integration.py` (`@pytest.mark.streams`); Testcontainers `redis:7.2-alpine`; see `docs/TESTS.md`. |
 | PR-TR-15 | **Reduce bash/curl surface:** migrate or thin-wrap `tests/*.sh` so CI runs `pytest` as primary; keep bash only as orchestration if needed. | DONE | Integration tests are Python-only; `scripts/ci_build_and_test.sh` remains shell for Docker Compose plus **readiness** `curl` polls before pytest (see `docs/TESTS.md`). |
-| PR-TR-16 | **Worker:** apply PR-TR-1–PR-TR-3 (offload + limits) inside `pdf-proc-worker` so the worker process does not block its event loop on PDF/LLM. | DONE | Same `_process_pdf_bytes` + `_llm_slot()` as API; explicit `LlmCapacityExceededError` → failed job (no silent drop). |
+| PR-TR-16 | **Worker:** apply PR-TR-1–PR-TR-3 (offload + limits) in worker containers (`async-pdf-proc-worker-<n>`) so the worker process does not block its event loop on PDF/LLM. | DONE | Same `_process_pdf_bytes` + `_llm_slot()` as API; explicit `LlmCapacityExceededError` → failed job (no silent drop). |
 | PR-TR-17 | **Worker:** implement PR-TR-7–PR-TR-9 (retry, reclaim, DLQ) in worker or companion supervisor process. | DONE | Implemented in `backend/app/worker.py` (same process). |
 | PR-TR-18 | **Optional horizontal scale:** multiple consumers, tuned `BLOCK`/`COUNT`, idempotent job execution verified under duplicate delivery. | DONE | `WORKER_XREADGROUP_*` envs; idempotent `done` skip in worker; `docker compose up --scale worker=N` (fixed `container_name` removed from worker service). |
 

@@ -46,6 +46,7 @@ The worker does **not** `XACK` while a message should remain pending for automat
 ## Horizontal scale (PR-TR-18)
 
 - Run **multiple worker containers** against the same `REDIS_CONSUMER_GROUP` (e.g. `docker compose up --scale worker=3`). Redis assigns pending messages across consumers.
+- With the repository `docker-compose.yml`, worker containers are named **`async-pdf-proc-worker-1`**, **`async-pdf-proc-worker-2`**, … (Compose project `async-pdf-proc`; the `worker` service has no fixed `container_name` so scaling keeps distinct host names).
 - Tune **`WORKER_XREADGROUP_COUNT`** and **`WORKER_XREADGROUP_BLOCK_MS`** for batching vs latency.
 - Idempotency (above) is required so that duplicate or overlapping deliveries never corrupt user-visible results.
 
