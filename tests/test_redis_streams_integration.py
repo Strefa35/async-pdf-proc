@@ -16,7 +16,12 @@ from typing import Any
 import pytest
 from redis.asyncio import Redis
 
-pytestmark = pytest.mark.streams
+pytestmark = [
+    pytest.mark.streams,
+    pytest.mark.filterwarnings(
+        "ignore:The @wait_container_is_ready decorator is deprecated.*:DeprecationWarning"
+    ),
+]
 
 STREAM = "tc_pr_tr14_doc_jobs"
 GROUP = "tc_pr_tr14_workers"

@@ -34,6 +34,23 @@ Options:
 | Markers | See [`pytest.ini`](../pytest.ini). Highlights: `unit` (in-process ASGI; needs **Redis** reachable at `REDIS_URL`, default `redis://127.0.0.1:6379/0`), `streams` (Redis Streams + **Testcontainers**; needs **Docker**), `integration` (live HTTP), `smoke`, `fr1`…`fr7`, `multi` |
 | Worker retry (unit, PR-TR-7) | [`tests/test_worker_failure_classification.py`](../tests/test_worker_failure_classification.py) — `test_transient_retry_defers_xadd_until_after_backoff_task` checks that retry **`XADD`** runs only after the delayed backoff task (main consumer path not blocked). Mocks Redis and `_process_pdf_bytes`; patches **`app.worker._retry_backoff_sleep`** (avoids patching global `asyncio.sleep`). No Docker. |
 
+### Preflight (`run_pytest.py`, `run_fr_tests.py`)
+
+Both runners call into [`tests/_runner_util.py`](../tests/_runner_util.py) **before** creating the venv and invoking pytest. If a required dependency is missing, they exit with code **2** and print **`[preflight]`** lines (start Compose, or narrow markers / set `SKIP_STREAMS_TESTS`).
+
+**`run_pytest_preflight(argv)`** (used by `run_pytest.py`):
+
+- Parses **`-m` / `--markexpr`** when present (first `-m` wins).
+- **Backend** (`BACKEND_URL`, default `http://localhost:8000`) and **frontend** (`FRONTEND_URL`, default `http://localhost:5173`) are checked with a short TCP connect unless the marker expression selects **`-m unit`** without `integration`, `smoke`, `fr1`–`fr7`, or `multi`.
+- **Docker** (`docker info`) is required when the expression includes **`streams`**, or **`not unit`** (full suite and most subsets), unless **`SKIP_STREAMS_TESTS=1`** or the expression contains **`not streams`**.
+
+**`run_fr_preflight(order, pytest_tail)`** (used by `run_fr_tests.py`):
+
+- Always checks backend and frontend TCP reachability.
+- Requires Docker when tag **`fr3`** is in the resolved order (async Streams coverage) or when trailing pytest args select **`streams`**, unless **`SKIP_STREAMS_TESTS=1`**.
+
+[`tests/test_redis_streams_integration.py`](../tests/test_redis_streams_integration.py) registers a module-level **`filterwarnings`** for the Testcontainers **`@wait_container_is_ready`** deprecation so local output stays clean.
+
 **Run the full suite** (stack must be up for `integration` tests; `unit` tests only need Redis):
 
 ```bash
@@ -130,4 +147,4 @@ Shared helpers: `tests/support/checks.py`, `tests/support/http_api.py`, `tests/s
 
 ---
 
-**Async PDF Processor** v.0.0.2 · 14 April 2026 · Code author: Arkadiusz Czerwinski
+**Async PDF Processor** v.0.0.2 · 15 April 2026 · Code author: Arkadiusz Czerwinski

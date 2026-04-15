@@ -33,7 +33,7 @@ The app runs as several services with Docker Compose:
 1. `backend` (container `async-pdf-proc-backend`)
    - FastAPI app
    - PDF parsing via `pypdf`
-   - Gemini calls via `google-generativeai`
+   - Gemini calls via `google-genai`
    - Redis integration for cache
 2. `worker` (containers `async-pdf-proc-worker-1`, …; Compose service; scale with `docker compose up --scale worker=N`)
    - consumes Redis Streams (`doc_jobs`) with at-least-once semantics; see [`docs/STREAMS_CONTRACT.md`](docs/STREAMS_CONTRACT.md)
@@ -52,7 +52,7 @@ The app runs as several services with Docker Compose:
 - FastAPI + Uvicorn
 - Redis 7 (`redis:7.2-alpine`)
 - PyPDF (`pypdf`)
-- Google Gemini 2.5 Flash
+- Google Gemini 2.5 Flash (`google-genai` SDK)
 - React 18 + TypeScript + Vite
 - Docker + Docker Compose
 
@@ -132,7 +132,7 @@ Defined in `docker-compose.yml` / backend:
 - `MISTRAL_OCR_RASTER_ZOOM` - PyMuPDF render scale for OCR raster (default: `1.75`)
 - `REDIS_URL` - default: `redis://redis:6379/0`
 - `CORS_ORIGINS` - default includes local frontend URLs
-- `GEMINI_CALL_TIMEOUT_SECONDS` - HTTP deadline passed to the Gemini SDK via `RequestOptions` when supported (default: `180`); the async handler also wraps blocking work with `asyncio.wait_for` for the same duration
+- `GEMINI_CALL_TIMEOUT_SECONDS` - HTTP deadline passed to the Gemini SDK via `HttpOptions` (milliseconds) on the client (default: `180`); the async handler also wraps blocking work with `asyncio.wait_for` for the same duration
 - `PDF_PARSE_TIMEOUT_SECONDS` - wall-clock cap for PyPDF extraction in the thread pool (default: `120`)
 - `MISTRAL_HTTP_TIMEOUT_SECONDS` - `httpx` read/write timeout for Mistral HTTP calls (default: `120`; connect uses `min(30, value)` seconds)
 - `BLOCKING_POOL_MAX_WORKERS` - thread pool size for CPU-heavy PyPDF / PyMuPDF work (default: `8`)
@@ -187,6 +187,8 @@ services:
 ## Testing
 
 Primary automated suite: **pytest** (`python3 tests/run_pytest.py` — JUnit XML and HTML report under `tests/report/`). This includes **Redis Streams** checks via Testcontainers (`-m streams`; needs Docker). HTTP integration tests expect a running stack. Details: **[`docs/TESTS.md`](docs/TESTS.md)**. Run commands from the project root.
+
+Both CLI runners (`tests/run_pytest.py` and `tests/run_fr_tests.py`) perform a quick **preflight** before invoking pytest. If required services are unavailable, they fail fast with a short actionable message instead of producing many repeated connection errors. By default, preflight checks backend/frontend reachability and Docker availability (for Streams tests).
 
 The CI helper script **`scripts/ci_build_and_test.sh`** waits for the Compose stack (optional **`docker compose --wait`**, then **`curl`** polls on backend and frontend proxy health) before downloading fixtures and running pytest; tunables are listed in **`docs/TESTS.md`**.
 
@@ -344,4 +346,4 @@ docker-compose up -d --build --force-recreate frontend
 
 ---
 
-**Async PDF Processor** v.0.0.2 · 14 April 2026 · Code author: Arkadiusz Czerwinski
+**Async PDF Processor** v.0.0.2 · 15 April 2026 · Code author: Arkadiusz Czerwinski

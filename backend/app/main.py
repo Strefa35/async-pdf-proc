@@ -29,9 +29,11 @@ except Exception:  # pragma: no cover
     fitz = None  # type: ignore[misc, assignment]
 
 try:
-    import google.generativeai as genai
+    from google import genai as google_genai
+    from google.genai import types as genai_types
 except Exception:  # pragma: no cover
-    genai = None
+    google_genai = None  # type: ignore[misc, assignment]
+    genai_types = None  # type: ignore[misc, assignment]
 
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -154,7 +156,7 @@ def _env_float_positive(name: str, default: str) -> float:
     return v
 
 
-# Gemini: HTTP deadline via SDK RequestOptions(_gemini_generate_content). PDF/CPU: asyncio.wait_for only.
+# Gemini: HTTP deadline via Client http_options (_gemini_generate_content). PDF/CPU: asyncio.wait_for only.
 GEMINI_CALL_TIMEOUT_SECONDS = _env_float_positive("GEMINI_CALL_TIMEOUT_SECONDS", "180")
 PDF_PARSE_TIMEOUT_SECONDS = _env_float_positive("PDF_PARSE_TIMEOUT_SECONDS", "120")
 def _gemini_inline_pdf_max_bytes() -> int:
@@ -230,20 +232,24 @@ def _shutdown_blocking_executor() -> None:
         _gemini_blocking_executor = None
 
 
-def _gemini_generate_content(model: Any, contents: Any) -> Any:
+def _gemini_http_timeout_ms() -> int:
+    """HTTP deadline for Gemini SDK calls (``HttpOptions.timeout`` is in milliseconds)."""
+    return max(1, int(round(float(GEMINI_CALL_TIMEOUT_SECONDS) * 1000)))
+
+
+def _gemini_generate_content(contents: Any) -> Any:
     """
-    Invoke Gemini ``generate_content`` with an SDK-level HTTP deadline when supported.
+    Invoke Gemini ``generate_content`` with an SDK-level HTTP deadline via ``HttpOptions``.
     This lets stuck requests fail inside the worker thread instead of relying only on
     ``asyncio.wait_for``, which does not cancel the underlying thread.
     """
-    try:
-        from google.generativeai.types import RequestOptions
-    except Exception:
-        return model.generate_content(contents)
-    return model.generate_content(
-        contents,
-        request_options=RequestOptions(timeout=GEMINI_CALL_TIMEOUT_SECONDS),
+    if google_genai is None or genai_types is None:
+        raise RuntimeError("google-genai is not installed")
+    client = google_genai.Client(
+        api_key=GOOGLE_API_KEY,
+        http_options=genai_types.HttpOptions(timeout=_gemini_http_timeout_ms()),
     )
+    return client.models.generate_content(model=GEMINI_MODEL, contents=contents)
 
 
 async def _run_blocking(
@@ -272,7 +278,7 @@ async def _run_blocking_timed(
     Run blocking callable in a bounded thread pool with an asyncio-level deadline.
 
     ``asyncio.wait_for`` alone does not stop the worker thread; combine with provider
-    deadlines (e.g. Gemini ``RequestOptions`` in ``_gemini_generate_content``) so slots
+    deadlines (e.g. Gemini ``HttpOptions`` in ``_gemini_generate_content``) so slots
     free promptly. For Gemini, pass ``thread_pool=_get_gemini_blocking_executor()`` to
     isolate SDK threads from PDF CPU work when ``GEMINI_POOL_MAX_WORKERS`` is set.
     """
@@ -289,7 +295,29 @@ async def _run_blocking_timed(
         ) from e
 
 
-app = FastAPI(title="Async PDF Processor")
+redis: Optional[Redis] = None
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    global redis
+    _init_blocking_executors()
+    redis = Redis.from_url(REDIS_URL, decode_responses=True)
+    try:
+        await redis.ping()
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(f"Redis connection failed: {e}") from e
+
+    try:
+        yield
+    finally:
+        if redis is not None:
+            await redis.aclose()
+            redis = None
+        _shutdown_blocking_executor()
+
+
+app = FastAPI(title="Async PDF Processor", lifespan=_lifespan)
 
 
 @app.exception_handler(LlmCapacityExceededError)
@@ -309,29 +337,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-redis: Optional[Redis] = None
-
-
-@app.on_event("startup")
-async def _startup() -> None:
-    global redis
-    _init_blocking_executors()
-    redis = Redis.from_url(REDIS_URL, decode_responses=True)
-    try:
-        await redis.ping()
-    except Exception as e:  # pragma: no cover
-        raise RuntimeError(f"Redis connection failed: {e}") from e
-
-
-@app.on_event("shutdown")
-async def _shutdown() -> None:
-    global redis
-    if redis is not None:
-        await redis.aclose()
-        redis = None
-    _shutdown_blocking_executor()
-
 
 def _sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
@@ -415,13 +420,11 @@ def _extract_markdown_with_gemini(
     filename: str,
     page_texts: list[str],
 ) -> str:
-    if genai is None:
-        raise HTTPException(status_code=500, detail="google-generativeai not available")
+    if google_genai is None or genai_types is None:
+        raise HTTPException(status_code=500, detail="google-genai not available")
     if not GOOGLE_API_KEY:
         raise HTTPException(status_code=500, detail="GOOGLE_API_KEY is not set")
 
-    genai.configure(api_key=GOOGLE_API_KEY)
-    model = genai.GenerativeModel(GEMINI_MODEL)
     expected_pages = len(page_texts)
     # Build a deterministic per-page prompt so the model can output markers.
     pages_block = []
@@ -442,7 +445,7 @@ def _extract_markdown_with_gemini(
         f"{chr(10).join(pages_block)}"
     )
     try:
-        resp = _gemini_generate_content(model, prompt)
+        resp = _gemini_generate_content(prompt)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini parser request failed: {e}") from e
 
@@ -464,8 +467,8 @@ def _extract_markdown_with_gemini_native_pdf(
     This path must not substitute PyPDF page text as the model input (PR-FR-2).
     Page count is taken from PDF structure only to guide marker-based splitting.
     """
-    if genai is None:
-        raise HTTPException(status_code=500, detail="google-generativeai not available")
+    if google_genai is None or genai_types is None:
+        raise HTTPException(status_code=500, detail="google-genai not available")
     if not GOOGLE_API_KEY:
         raise HTTPException(status_code=500, detail="GOOGLE_API_KEY is not set")
     max_inline = _gemini_inline_pdf_max_bytes()
@@ -479,8 +482,6 @@ def _extract_markdown_with_gemini_native_pdf(
             ),
         )
 
-    genai.configure(api_key=GOOGLE_API_KEY)
-    model = genai.GenerativeModel(GEMINI_MODEL)
     prompt = (
         "You are given a PDF document as binary input (application/pdf).\n"
         "Extract content as clean markdown, page by page, using only what is visible in the PDF.\n"
@@ -494,11 +495,11 @@ def _extract_markdown_with_gemini_native_pdf(
         f"Expected pages: {expected_pages}\n"
     )
     contents: list[object] = [
-        {"inline_data": {"mime_type": "application/pdf", "data": pdf_bytes}},
-        prompt,
+        genai_types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+        genai_types.Part.from_text(text=prompt),
     ]
     try:
-        resp = _gemini_generate_content(model, contents)
+        resp = _gemini_generate_content(contents)
     except HTTPException:
         raise
     except Exception as e:
@@ -663,7 +664,7 @@ async def _extract_markdown_with_mistral_ocr(page_pngs: list[bytes], *, filename
 
 def _safe_gemini_text(resp: object) -> str:
     """
-    google-generativeai sometimes returns a response without text parts
+    The Gemini SDK sometimes returns a response without text parts
     (e.g. finish_reason != stop). In that case `resp.text` may raise.
     """
     # 1) Try the "quick accessor" (may raise)
@@ -703,15 +704,12 @@ def _summarize_with_gemini(
     Create one summary per uploaded file using Gemini 2.5 Flash.
     Output is returned as markdown/plain text (provider-dependent).
     """
-    if genai is None:
-        raise HTTPException(status_code=500, detail="google-generativeai not available")
+    if google_genai is None or genai_types is None:
+        raise HTTPException(status_code=500, detail="google-genai not available")
     if not GOOGLE_API_KEY:
         raise HTTPException(status_code=500, detail="GOOGLE_API_KEY is not set")
     if not extracted_text.strip():
         return ""
-
-    genai.configure(api_key=GOOGLE_API_KEY)
-    model = genai.GenerativeModel(GEMINI_MODEL)
 
     answer_lang = _answer_language_name(language)
     snippet = extracted_text[:12000]
@@ -730,7 +728,7 @@ def _summarize_with_gemini(
     )
 
     try:
-        resp = _gemini_generate_content(model, prompt)
+        resp = _gemini_generate_content(prompt)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini summarization request failed: {e}") from e
 
@@ -1111,13 +1109,10 @@ def _answer_language_name(language: Optional[str]) -> str:
 
 
 def _gemini_answer_sync(payload: GeminiAnswerRequest) -> dict:
-    if genai is None:
-        raise HTTPException(status_code=500, detail="google-generativeai not available")
+    if google_genai is None or genai_types is None:
+        raise HTTPException(status_code=500, detail="google-genai not available")
     if not GOOGLE_API_KEY:
         raise HTTPException(status_code=500, detail="GOOGLE_API_KEY is not set")
-
-    genai.configure(api_key=GOOGLE_API_KEY)
-    model = genai.GenerativeModel(GEMINI_MODEL)
 
     answer_lang = _answer_language_name(payload.language)
 
@@ -1132,7 +1127,7 @@ def _gemini_answer_sync(payload: GeminiAnswerRequest) -> dict:
         full_prompt = f"User question:\n{payload.prompt}\n\nAnswer in {answer_lang}."
 
     try:
-        resp = _gemini_generate_content(model, full_prompt)
+        resp = _gemini_generate_content(full_prompt)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini request failed: {e}") from e
 

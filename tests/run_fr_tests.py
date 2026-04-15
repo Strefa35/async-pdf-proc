@@ -26,7 +26,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from tests._runner_util import default_report_args, run_pytest
+from tests._runner_util import default_report_args, run_fr_preflight, run_pytest
 
 DEFAULT_ORDER = ["fr1", "fr2", "fr3", "fr4", "fr5", "fr6", "fr7", "multi"]
 
@@ -53,6 +53,9 @@ def main(argv: list[str]) -> int:
     ns, pytest_tail = parser.parse_known_args(argv)
     pytest_tail = [a for a in pytest_tail if a != "--"]
     order = resolve_order(ns)
+    preflight_rc = run_fr_preflight(order, pytest_tail)
+    if preflight_rc != 0:
+        return preflight_rc
     base_extra = ["-vv", "--tb=short", *default_report_args()]
 
     known = set(DEFAULT_ORDER)

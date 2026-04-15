@@ -56,4 +56,4 @@ The backend should take the uploaded PDF, the desired parser from above, then pa
 
 ---
 
-**Async PDF Processor** v.0.0.2 · 14 April 2026 · Code author: Arkadiusz Czerwinski
+**Async PDF Processor** v.0.0.2 · 15 April 2026 · Code author: Arkadiusz Czerwinski

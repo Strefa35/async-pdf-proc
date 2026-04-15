@@ -297,4 +297,4 @@ curl -s -X POST http://localhost:5173/api/pdf/extract \
 
 ---
 
-**Async PDF Processor** v.0.0.2 · 14 April 2026 · Code author: Arkadiusz Czerwinski
+**Async PDF Processor** v.0.0.2 · 15 April 2026 · Code author: Arkadiusz Czerwinski
